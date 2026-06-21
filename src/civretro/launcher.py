@@ -298,45 +298,68 @@ async def activate_autoplay(c: CDPClient, n_turns: int) -> bool:
     return result and "true" in str(result)
 
 
-async def wait_for_autoplay_done(c: CDPClient, n_turns: int, mode: str = "sp", max_wait: int = 7200) -> dict:
-    """Poll until Autoplay signals done or n_turns turn advances are tracked."""
-    log.info("waiting for game to finish (mode=%s, target=%d turns)...", mode, n_turns)
+async def wait_for_autoplay_done(c: CDPClient, n_turns: int, max_wait: int = 7200) -> dict:
+    """
+    Poll until the recorder has captured n_turns, then actively exit to menu.
+
+    Primary signal: civretro:index in localStorage (authoritative, set by recorder mod).
+    Fallback: Game.turn advance counting (used before first recorder write).
+    Works identically for SP and MP — does not rely on Autoplay.isActive.
+    """
+    log.info("waiting for recorder to capture %d turns...", n_turns)
     last_turn = None
     turn_advances = 0
 
-    for i in range(0, max_wait, 5):
+    for _ in range(0, max_wait, 5):
         await asyncio.sleep(5)
-        raw = await safe_eval(
-            c,
-            "JSON.stringify({active: Autoplay.isActive, turn: Game.turn, age: Game.age})",
-            timeout=10,
+
+        # Primary: recorder's authoritative captured-turn index
+        idx_raw = await safe_eval(c, "localStorage.getItem('civretro:index')", timeout=10)
+        if idx_raw and idx_raw not in ("null", "undefined"):
+            try:
+                idx = json.loads(idx_raw)
+                captured = len(idx.get("turns", []))
+                if captured % 5 == 0 and captured > 0:
+                    log.info("recorder: %d/%d turns captured", captured, n_turns)
+                if captured >= n_turns:
+                    log.info("recorder done (%d turns) — sending exitToMainMenu", captured)
+                    try:
+                        await eval_any(c, 'engine.call("exitToMainMenu")', timeout=5)
+                    except Exception:
+                        pass
+                    return {"turns_captured": captured, "session_id": idx.get("sessionId")}
+                continue
+            except Exception:
+                pass
+
+        # Fallback: Game.turn advance tracking (before recorder writes first entry)
+        snap_raw = await safe_eval(
+            c, "JSON.stringify({turn: Game.turn})", timeout=10,
         )
-        if not raw:
+        if not snap_raw:
             continue
         try:
-            data = json.loads(raw)
+            snap = json.loads(snap_raw)
         except Exception:
             continue
 
-        turn = data.get("turn", 0)
-        active = data.get("active")
-
+        turn = snap.get("turn", 0)
         if last_turn is not None and turn != last_turn:
             turn_advances += 1
-            if turn_advances % 5 == 0 or turn_advances == n_turns:
-                log.info("progress: turn=%d advances=%d/%d", turn, turn_advances, n_turns)
+            if turn_advances % 5 == 0:
+                log.info("fallback: turn=%d advances=%d/%d", turn, turn_advances, n_turns)
         last_turn = turn
 
-        if mode == "sp" and not active:
-            log.info("autoplay done at turn=%d advances=%d", turn, turn_advances)
-            return {"turn": turn, "advances": turn_advances}
-
         if turn_advances >= n_turns:
-            log.info("reached %d turn advances → done", turn_advances)
-            return {"turn": turn, "advances": turn_advances}
+            log.info("fallback: %d advances → exitToMainMenu", turn_advances)
+            try:
+                await eval_any(c, 'engine.call("exitToMainMenu")', timeout=5)
+            except Exception:
+                pass
+            return {"turns_captured": turn_advances}
 
     log.warning("wait_for_autoplay_done timed out after %ds", max_wait)
-    return {"turn": last_turn or 0, "advances": turn_advances, "timed_out": True}
+    return {"turns_captured": 0, "timed_out": True}
 
 
 # ── CLI entry points ──────────────────────────────────────────────────────────
@@ -398,10 +421,11 @@ async def _run(args):
     await try_begin_game(c)
 
     run_start = time.time()
-    result = await wait_for_autoplay_done(c, args.n_turns, mode=args.mode)
+    result = await wait_for_autoplay_done(c, args.n_turns)
     elapsed = time.time() - run_start
 
-    log.info("returning to main menu...")
+    # exitToMainMenu was sent inside wait_for_autoplay_done; confirm menu reached
+    log.info("confirming return to main menu...")
     try:
         c = await ensure_at_menu(c)
         await c.close()
@@ -412,11 +436,9 @@ async def _run(args):
         except Exception:
             pass
 
-    log.info(
-        "run complete  advances=%d/%d  wall=%.0fs",
-        result.get("advances", 0), args.n_turns, elapsed,
-    )
-    return {"elapsed": elapsed, "advances": result.get("advances", 0), "n_turns": args.n_turns}
+    turns_captured = result.get("turns_captured", 0)
+    log.info("run complete  turns=%d/%d  wall=%.0fs", turns_captured, args.n_turns, elapsed)
+    return {"elapsed": elapsed, "turns_captured": turns_captured, "n_turns": args.n_turns}
 
 
 def main_cli():
@@ -424,7 +446,7 @@ def main_cli():
     configure_logging()
     args = _parse_args_standalone()
     s = asyncio.run(_run(args))
-    log.info("done  advances=%d/%d  wall=%.0fs", s["advances"], s["n_turns"], s["elapsed"])
+    log.info("done  turns=%d/%d  wall=%.0fs", s["turns_captured"], s["n_turns"], s["elapsed"])
 
 
 def _parse_args_standalone():

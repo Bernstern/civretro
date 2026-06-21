@@ -59,7 +59,7 @@ def parse_args():
 async def main(args):
     configure_logging()
     s = await _run(args)
-    print(f"\nDone  advances={s['advances']}/{s['n_turns']}  wall={s['elapsed']:.0f}s\n")
+    print(f"\nDone  turns={s['turns_captured']}/{s['n_turns']}  wall={s['elapsed']:.0f}s\n")
 
 
 if __name__ == "__main__":
