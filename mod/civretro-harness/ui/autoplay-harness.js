@@ -30,9 +30,29 @@
 //     observeAs: -1,   // -1 = no camera; 1000 = full-vision observer
 //     returnAs:  0,    // player to return control to when autoplay ends
 //   }
+//
+// Debug logging:
+//   Set localStorage key civretro:debug = '1' to enable Automation.log output.
+//   The launcher injects this via CDP: localStorage.setItem('civretro:debug','1')
+//   Logs are written to the game's Automation log file.
 
 (function () {
     const TAG = "CIVRETRO:harness";
+
+    // -------------------------------------------------------------------------
+    // Logger — writes to Automation.log when civretro:debug = '1' in localStorage.
+    // error() is always-on regardless of the flag.
+    // -------------------------------------------------------------------------
+    var log = (function () {
+        function isEnabled() {
+            try { return localStorage.getItem('civretro:debug') === '1'; } catch (e) { return false; }
+        }
+        return {
+            info:  function (msg) { if (isEnabled()) Automation.log(TAG + ':INFO: ' + msg); },
+            warn:  function (msg) { if (isEnabled()) Automation.log(TAG + ':WARN: ' + msg); },
+            error: function (msg) { Automation.log(TAG + ':ERR: ' + msg); },
+        };
+    })();
 
     function cfg() {
         try {
@@ -64,9 +84,9 @@
             Autoplay.setReturnAsPlayer(returnAs);
             Autoplay.setObserveAsPlayer(observeAs);
 
-            console.log(`${TAG}: config applied turns=${turns} observeAs=${observeAs} returnAs=${returnAs} (isActive=${Autoplay.isActive})`);
+            log.info('config applied turns=' + turns + ' observeAs=' + observeAs + ' returnAs=' + returnAs + ' isActive=' + Autoplay.isActive);
         } catch (e) {
-            console.warn(`${TAG}: applyConfig failed: ${e.message}`);
+            log.error('applyConfig failed: ' + e.message);
         }
     }
 
@@ -75,10 +95,10 @@
             applyConfig();
             if (!Autoplay.isActive) {
                 Autoplay.setActive(true);
-                console.log(`${TAG}: Autoplay.setActive(true)`);
+                log.info('Autoplay.setActive(true)');
             }
         } catch (e) {
-            console.warn(`${TAG}: activateAutoplay failed: ${e.message}`);
+            log.error('activateAutoplay failed: ' + e.message);
         }
     }
 
@@ -87,7 +107,9 @@
     // If Autoplay is not yet available (early load), the catch is a no-op and
     // the event handlers below will pick it up.
     // -------------------------------------------------------------------------
+    log.info('eval autoplayDefined=' + (typeof Autoplay !== 'undefined') + ' isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
     activateAutoplay();
+    log.info('eval-after isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
 
     // -------------------------------------------------------------------------
     // BELT-AND-SUSPENDERS: re-arm on engine events.
@@ -97,22 +119,22 @@
     // -------------------------------------------------------------------------
 
     engine.on("PostGameInitialization", function () {
-        console.log(`${TAG}: PostGameInitialization`);
+        log.info('PostGameInitialization isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
         activateAutoplay();
     });
 
     engine.on("GameStarted", function () {
-        console.log(`${TAG}: GameStarted`);
+        log.info('GameStarted isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
         activateAutoplay();
     });
 
     engine.on("AutoplayEnded", function () {
-        console.log(`${TAG}: AutoplayEnded — re-arming`);
+        log.info('AutoplayEnded — re-arming');
         activateAutoplay();
     });
 
     engine.on("GameAgeEnded", function () {
-        console.log(`${TAG}: GameAgeEnded — pre-arming for next age`);
+        log.info('GameAgeEnded — pre-arming for next age');
         activateAutoplay();
     });
 
@@ -129,21 +151,21 @@
                 setTimeout(function () {
                     try {
                         GameContext.sendTurnComplete();
-                        console.log(`${TAG}: MP auto-EndTurn submitted`);
+                        log.info('MP auto-EndTurn submitted');
                     } catch (e) {
-                        console.warn(`${TAG}: sendTurnComplete failed: ${e.message}`);
+                        log.error('sendTurnComplete failed: ' + e.message);
                     }
                 }, 300);
             }
         } catch (e) {
-            console.warn(`${TAG}: LocalPlayerTurnBegin handler error: ${e.message}`);
+            log.error('LocalPlayerTurnBegin handler error: ' + e.message);
         }
     });
 
     engine.whenReady.then(function () {
+        log.info('whenReady isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
         activateAutoplay();
-        console.log(`${TAG}: ready`);
     });
 
-    console.log(`${TAG}: loaded`);
+    log.info('loaded');
 })();
