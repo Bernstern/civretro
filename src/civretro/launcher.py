@@ -2,7 +2,7 @@
 Game launch helpers — connect to CDP, navigate menus, start an all-AI game,
 wait for readiness, and activate Autoplay.
 
-Also provides main() / parse_args() used by both tools/run_game.py (direct
+Also provides main() / build_arg_parser() used by both tools/run_game.py (direct
 invocation) and the run-game console script entry point (main_cli).
 """
 
@@ -11,6 +11,7 @@ import asyncio
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from civretro.cdp import CDPClient, CDP_PORT, eval_any
@@ -18,6 +19,21 @@ from civretro.log import configure_logging, get_logger
 from civretro.queries import READINESS_JS
 
 log = get_logger(__name__)
+
+
+class RunError(Exception):
+    pass
+
+
+@dataclass
+class RunConfig:
+    n_turns: int
+    n_players: int
+    seed: int | None
+    mode: str
+    speed: str
+    map_size: str
+    map_type: str | None
 
 
 async def connect_with_retry(max_wait: int = 120) -> CDPClient | None:
@@ -29,7 +45,12 @@ async def connect_with_retry(max_wait: int = 120) -> CDPClient | None:
             log.info("connected to CDP on port %d", CDP_PORT)
             return c
         except Exception:
-            if i % 15 == 0:
+            if i == 0:
+                log.warning(
+                    "Civ 7 not reachable on port %d — is the game running with the -dev Steam launch flag?",
+                    CDP_PORT,
+                )
+            elif i % 15 == 0:
                 log.warning("[%ds] waiting for CDP on port %d...", i, CDP_PORT)
             await asyncio.sleep(1)
     return None
@@ -47,6 +68,9 @@ async def safe_eval(c: CDPClient, js: str, timeout: float = 30.0):
             pass
         c2 = await connect_with_retry(30)
         if c2:
+            # Hack: transplant the new WebSocket into the existing client so all
+            # callers holding a reference to `c` automatically get the live socket.
+            # c2 is intentionally not closed — its _ws reference now lives in c.
             c._ws = c2._ws
             try:
                 return await eval_any(c, js, timeout)
@@ -213,11 +237,7 @@ async def wait_for_game_ready(max_wait: int = 180, n_turns: int = 0) -> CDPClien
     if c is None:
         return None
 
-    # Inject harness config IMMEDIATELY after CDP reconnects, before the
-    # loading curtain clears and ContextManager.push("screen-advanced-start")
-    # fires. The civretro-harness mod's isEnabled() check gates on this flag.
-    # Inject harness config. The harness reads turns/observeAs/returnAs from
-    # window.__civretro to configure Autoplay. No isEnabled() guard — always active.
+    # Inject optional Autoplay config for the harness mod (turns/observeAs/returnAs).
     harness_js = (
         f"window.__civretro = {{turns: {n_turns}, observeAs: -1, returnAs: 0}}"
     )
@@ -254,57 +274,6 @@ async def wait_for_game_ready(max_wait: int = 180, n_turns: int = 0) -> CDPClien
             log.debug("[%ds] %s", i, ready)
 
     return None
-
-
-_BEGIN_CLICK_JS = """(function(){
-  var LABELS = /^(begin|start|start game|play|continue|ok|launch|next)$/i;
-  var candidates = Array.from(document.querySelectorAll(
-    'button, [class*="btn"], [class*="button"], [class*="action"], fxs-button'
-  ));
-  for (var i = 0; i < candidates.length; i++) {
-    var el = candidates[i];
-    var txt = (el.textContent || el.innerText || el.getAttribute('caption') || '').trim();
-    if (LABELS.test(txt)) {
-      el.click();
-      return 'clicked:' + txt;
-    }
-  }
-  return 'not-found:' + candidates.length + ' candidates checked';
-})()"""
-
-
-async def try_begin_game(c: CDPClient, max_attempts: int = 8, interval: float = 2.0) -> bool:
-    """Retry DOM click for Begin/Start screen for up to max_attempts × interval seconds."""
-    for attempt in range(max_attempts):
-        try:
-            result = await asyncio.wait_for(eval_any(c, _BEGIN_CLICK_JS), timeout=5)
-            log.info("begin screen attempt %d/%d: %s", attempt + 1, max_attempts, result)
-            if isinstance(result, str) and result.startswith("clicked:"):
-                return True
-        except Exception as e:
-            log.debug("begin click attempt %d failed: %s", attempt + 1, e)
-        if attempt < max_attempts - 1:
-            await asyncio.sleep(interval)
-    log.warning("begin screen: no button found after %d attempts", max_attempts)
-    return False
-
-
-async def activate_autoplay(c: CDPClient, n_turns: int) -> bool:
-    result = await eval_any(
-        c,
-        f"""(function(){{
-          try {{
-            Autoplay.setTurns({n_turns});
-            Autoplay.setReturnAsPlayer(-1);
-            Autoplay.setObserveAsPlayer(-1);
-            Autoplay.setActive(true);
-            return JSON.stringify({{active: Autoplay.isActive, turns: {n_turns}}});
-          }} catch(e) {{ return 'err:' + e.message; }}
-        }})()""",
-        timeout=5,
-    )
-    log.info("Autoplay: %s", result)
-    return result and "true" in str(result)
 
 
 _HANG_WARN_S  = 120   # warn if no new turns for this many seconds
@@ -347,6 +316,8 @@ async def wait_for_autoplay_done(
                 idx = json.loads(idx_raw)
                 current_session = idx.get("sessionId")
 
+                # The recorder resumes the same sessionId across age transitions but always
+                # generates a new one for a fresh game — this guard correctly fires on new game launch
                 if not session_confirmed:
                     if current_session and current_session != prior_session_id:
                         session_confirmed = True
@@ -355,7 +326,8 @@ async def wait_for_autoplay_done(
                         log.debug("waiting for new session (still %s)", current_session)
                         continue
 
-                captured = len(idx.get("turns", []))
+                # totalTurns is the global counter across age transitions; falls back to len(turns) for older recorder versions
+                captured = idx.get("totalTurns") or len(idx.get("turns", []))
                 if captured > last_captured:
                     last_captured = captured
                     last_progress_t = time.monotonic()
@@ -419,18 +391,18 @@ async def wait_for_autoplay_done(
 
 # ── CLI entry points ──────────────────────────────────────────────────────────
 
-async def _run(args):
+async def _run(cfg: RunConfig):
     """Core async run logic shared by main() and main_cli()."""
     log.info(
         "CivRetro run_game  turns=%d  players=%d  speed=%s  map_size=%s  mode=%s  seed=%s",
-        args.n_turns, args.n_players, args.speed, args.map_size, args.mode, args.seed,
+        cfg.n_turns, cfg.n_players, cfg.speed, cfg.map_size, cfg.mode, cfg.seed,
     )
 
-    log.info("connecting to CDP...")
+    log.info("── connecting ──")
     c = await connect_with_retry(30)
     if c is None:
-        log.error("could not connect to Civ 7 CDP on port 9444. Is the game running?")
-        sys.exit(1)
+        log.error("could not connect to Civ 7 CDP on port %d", CDP_PORT)
+        raise RunError(f"could not connect to Civ 7 CDP on port {CDP_PORT}")
 
     in_shell = await safe_eval(c, "UI.isInShell()", timeout=5)
     if not in_shell:
@@ -442,14 +414,15 @@ async def _run(args):
             turn_str = ""
         log.warning("game already running%s", turn_str)
         try:
-            answer = input(f"Back out of current game{turn_str} and launch new {args.n_players}p/{args.n_turns}t game? [y/N] ").strip().lower()
+            answer = input(f"Back out of current game{turn_str} and launch new {cfg.n_players}p/{cfg.n_turns}t game? [y/N] ").strip().lower()
         except EOFError:
             answer = ""
+            log.info("non-interactive context — game already running, aborting")
         if answer != "y":
-            log.info("aborted by user")
             await c.close()
             sys.exit(0)
 
+    log.info("── configuring game ──")
     c = await ensure_at_menu(c)
 
     # Capture old session ID before launching so wait_for_autoplay_done can
@@ -465,29 +438,40 @@ async def _run(args):
 
     log.info("launching game...")
     ok = await launch_game(
-        c, args.n_players, args.seed,
-        speed=args.speed, map_size=args.map_size, map_type=args.map_type, mode=args.mode,
+        c, cfg.n_players, cfg.seed,
+        speed=cfg.speed, map_size=cfg.map_size, map_type=cfg.map_type, mode=cfg.mode,
     )
     if not ok:
         log.error("failed to launch game")
-        sys.exit(1)
+        raise RunError("failed to launch game")
 
     try:
         await c.close()
     except Exception:
         pass
 
-    c = await wait_for_game_ready(n_turns=args.n_turns)
+    log.info("── waiting for load ──")
+    c = await wait_for_game_ready(n_turns=cfg.n_turns)
     if c is None:
         log.error("game never became ready")
-        sys.exit(1)
+        raise RunError("game never became ready")
 
     # Harness handles Autoplay activation and Begin screen suppression.
+    log.info("── collecting ──")
     run_start = time.time()
-    result = await wait_for_autoplay_done(c, args.n_turns, prior_session_id=prior_session_id)
+    try:
+        result = await wait_for_autoplay_done(c, cfg.n_turns, prior_session_id=prior_session_id)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        log.warning("interrupted — sending exitToMainMenu before exiting")
+        try:
+            await eval_any(c, 'engine.call("exitToMainMenu")', timeout=5)
+        except Exception:
+            pass
+        raise
     elapsed = time.time() - run_start
 
     # exitToMainMenu was sent inside wait_for_autoplay_done; confirm menu reached
+    log.info("── exiting ──")
     log.info("confirming return to main menu...")
     try:
         c = await ensure_at_menu(c)
@@ -500,19 +484,12 @@ async def _run(args):
             pass
 
     turns_captured = result.get("turns_captured", 0)
-    log.info("run complete  turns=%d/%d  wall=%.0fs", turns_captured, args.n_turns, elapsed)
-    return {"elapsed": elapsed, "turns_captured": turns_captured, "n_turns": args.n_turns}
+    log.info("run complete  turns=%d/%d  wall=%.0fs", turns_captured, cfg.n_turns, elapsed)
+    return {"elapsed": elapsed, "turns_captured": turns_captured, "n_turns": cfg.n_turns}
 
 
-def main_cli():
-    """Entry point for the run-game console script (installed via pyproject.toml)."""
-    configure_logging()
-    args = _parse_args_standalone()
-    s = asyncio.run(_run(args))
-    log.info("done  turns=%d/%d  wall=%.0fs", s["turns_captured"], s["n_turns"], s["elapsed"])
-
-
-def _parse_args_standalone():
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the shared argument parser for all run-game entry points."""
     p = argparse.ArgumentParser(
         description="Launch an automated Civ 7 game via CDP.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -521,8 +498,6 @@ def _parse_args_standalone():
     p.add_argument("--n-players", type=int,   default=6,    choices=range(2, 7), metavar="2-6",
                    help="Number of AI players (default: 6)")
     p.add_argument("--seed",      type=int,   default=None, help="Map+game seed for reproducibility")
-    p.add_argument("--tag",       type=str,   default=None, help="Label for this run (informational)")
-    p.add_argument("--note",      type=str,   default=None, help="Free-text note (informational)")
     p.add_argument("--mode",      type=str,   default="sp", choices=["sp", "mp"],
                    help="Game mode: sp (single-player) or mp (LAN multiplayer) (default: sp)")
     p.add_argument("--speed",     type=str,   default="online",
@@ -535,4 +510,30 @@ def _parse_args_standalone():
                    choices=["continents", "continents-plus", "archipelago", "fractal",
                             "pangaea-plus", "shuffle", "terra-incognita"],
                    help="Map script (default: game default)")
-    return p.parse_args()
+    return p
+
+
+def _args_to_config(args) -> RunConfig:
+    """Convert an argparse Namespace to a RunConfig dataclass."""
+    return RunConfig(
+        n_turns=args.n_turns,
+        n_players=args.n_players,
+        seed=args.seed,
+        mode=args.mode,
+        speed=args.speed,
+        map_size=args.map_size,
+        map_type=args.map_type,
+    )
+
+
+def main_cli():
+    """Entry point for the run-game console script (installed via pyproject.toml)."""
+    configure_logging()
+    args = build_arg_parser().parse_args()
+    cfg = _args_to_config(args)
+    try:
+        s = asyncio.run(_run(cfg))
+    except RunError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    log.info("done  turns=%d/%d  wall=%.0fs", s["turns_captured"], s["n_turns"], s["elapsed"])

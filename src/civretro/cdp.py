@@ -46,38 +46,26 @@ class CDPClient:
             await self._ws.close()
             self._ws = None
 
-    async def evaluate(self, js: str, timeout: float = 5.0) -> str:
+    async def eval(self, js: str, timeout: float = 20.0):
+        """Evaluate JS and return a Python value for any primitive result type."""
         self._msg_id += 1
         msg = json.dumps({
             "id": self._msg_id,
             "method": "Runtime.evaluate",
             "params": {"expression": js, "returnByValue": True},
         })
-        log.debug("CDP eval id=%d", self._msg_id)
         await self._ws.send(msg)
         raw = await asyncio.wait_for(self._ws.recv(), timeout=timeout)
         resp = json.loads(raw)
         result = resp.get("result", {}).get("result", {})
-        if result.get("type") == "string":
+        t = result.get("type")
+        if t in ("string", "boolean", "number"):
             return result["value"]
-        raise RuntimeError(f"Unexpected CDP result: {resp}")
+        if t == "undefined":
+            return None
+        return result
 
 
 async def eval_any(c: CDPClient, js: str, timeout: float = 20.0):
-    """Evaluate JS and return a Python value for any primitive result type."""
-    c._msg_id += 1
-    msg = json.dumps({
-        "id": c._msg_id,
-        "method": "Runtime.evaluate",
-        "params": {"expression": js, "returnByValue": True},
-    })
-    await c._ws.send(msg)
-    raw = await asyncio.wait_for(c._ws.recv(), timeout=timeout)
-    resp = json.loads(raw)
-    result = resp.get("result", {}).get("result", {})
-    t = result.get("type")
-    if t in ("string", "boolean", "number"):
-        return result["value"]
-    if t == "undefined":
-        return None
-    return result
+    """Thin shim for backward compatibility — delegates to CDPClient.eval()."""
+    return await c.eval(js, timeout)
