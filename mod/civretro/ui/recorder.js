@@ -148,28 +148,34 @@
                     diplomacy: (function() {
                         try {
                             if (!p.Diplomacy) return null;
-                            var ids = Players.getAliveMajorIds();
+                            var majorIds = Players.getAliveMajorIds();
                             var rels = {};
-                            for (var i = 0; i < ids.length; i++) {
-                                var otherId = ids[i];
+                            for (var di = 0; di < majorIds.length; di++) {
+                                var otherId = majorIds[di];
                                 if (otherId === id) continue;
                                 try {
                                     rels[otherId] = {
-                                        warState: p.Diplomacy.getWarState ? p.Diplomacy.getWarState(otherId) : null,
-                                        hasAlliance: p.Diplomacy.hasAlliance ? p.Diplomacy.hasAlliance(otherId) : null,
-                                        influence: p.Diplomacy.getInfluence ? p.Diplomacy.getInfluence(otherId) : null
+                                        isAtWar:           p.Diplomacy.isAtWarWith       ? p.Diplomacy.isAtWarWith(otherId)       : null,
+                                        hasAllied:         p.Diplomacy.hasAllied          ? p.Diplomacy.hasAllied(otherId)          : null,
+                                        hasMet:            p.Diplomacy.hasMet             ? p.Diplomacy.hasMet(otherId)             : null,
+                                        relationshipLevel: p.Diplomacy.getRelationshipLevel ? p.Diplomacy.getRelationshipLevel(otherId) : null,
                                     };
                                 } catch(e) {}
                             }
+                            try { rels._favors    = p.Diplomacy.getNumFavors    ? p.Diplomacy.getNumFavors()    : null; } catch(e) {}
+                            try { rels._grievances = p.Diplomacy.getNumGrievances ? p.Diplomacy.getNumGrievances() : null; } catch(e) {}
                             return rels;
                         } catch(e) { return null; }
                     })(),
                     victories: (function() {
                         try {
-                            if (!p.Victories) return null;
+                            // p.Victories methods require VictoryType hash args — use Game.VictoryManager instead
+                            // for a hash-free aggregate view of this player's victory state.
+                            var vm = (typeof Game !== "undefined") ? Game.VictoryManager : null;
+                            if (!vm) return null;
                             var out = {};
-                            if (typeof p.Victories.getScore === 'function') out.score = p.Victories.getScore();
-                            if (typeof p.Victories.getProgress === 'function') out.progress = p.Victories.getProgress();
+                            try { out.progress = vm.getVictoryProgress ? vm.getVictoryProgress() : null; } catch(e) {}
+                            try { out.victories = vm.getVictories ? vm.getVictories() : null; } catch(e) {}
                             return out;
                         } catch(e) { return null; }
                     })()
