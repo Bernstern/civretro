@@ -344,6 +344,23 @@
                 const obj = safe(() => p[sub]);
                 if (obj && typeof obj === "object") probeObj("Player[0]." + sub, obj);
             }
+            // Probe first city's sub-objects (BuildQueue, etc.)
+            try {
+                const cs = p.Cities ? p.Cities.getCities() : [];
+                if (cs && cs.length > 0) {
+                    const city = cs[0];
+                    probeObj("City[0]", city);
+                    const citySubs = ["BuildQueue","Culture","Religion","Trade"];
+                    for (const sub of citySubs) {
+                        const obj = safe(() => city[sub]);
+                        if (obj && typeof obj === "object") probeObj("City[0]." + sub, obj);
+                    }
+                } else {
+                    alog("  City probe: no cities yet");
+                }
+            } catch (e) {
+                alog("  City probe ERR: " + e.message);
+            }
         } catch (e) {
             alog("  ERR: " + e.message);
         }
