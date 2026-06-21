@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Mod id="civretro-harness" version="1" xmlns="ModInfo">
+  <Properties>
+    <Name>CivRetro AI Harness</Name>
+    <Version>1.0.0</Version>
+    <Description>Developer tool: suppresses the Begin screen and Age Transition screens so autonomous all-AI games can run without human input. Not for end users — see README.md.</Description>
+    <Authors>civretro</Authors>
+    <Package>Mod</Package>
+    <AffectsSavedGames>0</AffectsSavedGames>
+    <ShowInBrowser>0</ShowInBrowser>
+  </Properties>
+
+  <Dependencies>
+    <Mod id="base-standard" title="LOC_MODULE_BASE_STANDARD_NAME" />
+  </Dependencies>
+
+  <ActionCriteria>
+    <Criteria id="always">
+      <AlwaysMet />
+    </Criteria>
+  </ActionCriteria>
+
+  <ActionGroups>
+    <ActionGroup id="civretro-harness-game" scope="game" criteria="always">
+      <Properties>
+        <!-- High load order ensures we register AFTER base-standard's notification-handlers.js.
+             NotificationModel.manager.registerHandler() is a plain dict write; last write wins. -->
+        <LoadOrder>1000</LoadOrder>
+      </Properties>
+      <Actions>
+        <ImportFiles>
+          <Item>ui/autoplay-harness.js</Item>
+        </ImportFiles>
+        <UIScripts>
+          <Item>ui/autoplay-harness.js</Item>
+        </UIScripts>
+      </Actions>
+    </ActionGroup>
+  </ActionGroups>
+</Mod>

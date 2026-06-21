@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Mod id="civretro" version="1" xmlns="ModInfo">
+  <Properties>
+    <Name>CivRetro Recorder</Name>
+    <Description>Records per-turn game state to localStorage for replay viewer.</Description>
+    <Authors>civretro</Authors>
+    <Package>Mod</Package>
+    <AffectsSavedGames>0</AffectsSavedGames>
+    <ShowInBrowser>1</ShowInBrowser>
+  </Properties>
+  <Dependencies>
+    <Mod id="base-standard" title="LOC_MODULE_BASE_STANDARD_NAME" />
+  </Dependencies>
+  <ActionCriteria>
+    <Criteria id="always"><AlwaysMet /></Criteria>
+  </ActionCriteria>
+  <ActionGroups>
+    <ActionGroup id="civretro-game" scope="game" criteria="always">
+      <Actions>
+        <ImportFiles><Item>ui/recorder.js</Item></ImportFiles>
+        <UIScripts><Item>ui/recorder.js</Item></UIScripts>
+      </Actions>
+    </ActionGroup>
+  </ActionGroups>
+</Mod>

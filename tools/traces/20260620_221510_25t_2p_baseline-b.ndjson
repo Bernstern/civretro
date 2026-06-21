@@ -1,0 +1,5 @@
+{"type":"runmeta","seq":0,"session":"7457a678","ts":1781993736419,"config":{"n_turns":25,"n_players":2,"poll_interval":1.0,"seed":null,"tag":"baseline-b","note":null,"mode":"autoplay"},"roster":[{"id":0,"name":"LOC_LEADER_CATHERINE_NAME","leaderResolved":"Catherine the Great","civType":185445610,"leaderType":-767424053,"isHuman":true},{"id":1,"name":"LOC_LEADER_ASHOKA_ALT_NAME","leaderResolved":"Ashoka, World Conqueror","civType":42338908,"leaderType":-1162603287,"isHuman":false}],"map":{"w":74,"h":46}}
+{"type":"error","reason":"cdp_lost","detail":"ConnectionClosedError","after_turn":1,"ts":1781993758221,"seq":1,"session":"7457a678"}
+{"type":"error","reason":"cdp_lost","detail":"ConnectionClosedError","after_turn":1,"ts":1781993798277,"seq":2,"session":"7457a678"}
+{"type":"error","reason":"cdp_lost","detail":"ConnectionClosedError","after_turn":1,"ts":1781993838389,"seq":3,"session":"7457a678"}
+{"type":"error","reason":"cdp_lost","detail":"ConnectionClosedError","after_turn":1,"ts":1781993878585,"seq":4,"session":"7457a678"}

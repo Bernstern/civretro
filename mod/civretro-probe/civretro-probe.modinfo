@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Mod id="civretro-probe" version="1" xmlns="ModInfo">
+  <Properties>
+    <Name>CivRetro API Probe</Name>
+    <Version>1.0.0</Version>
+    <Description>Developer tool: dumps all accessible globals and C++ object APIs to Automation.log for offline analysis. Run once, examine the log, remove. Not for end users.</Description>
+    <Authors>civretro</Authors>
+    <Package>Mod</Package>
+    <AffectsSavedGames>0</AffectsSavedGames>
+    <ShowInBrowser>0</ShowInBrowser>
+  </Properties>
+
+  <Dependencies>
+    <Mod id="base-standard" title="LOC_MODULE_BASE_STANDARD_NAME" />
+  </Dependencies>
+
+  <ActionCriteria>
+    <Criteria id="always">
+      <AlwaysMet />
+    </Criteria>
+  </ActionCriteria>
+
+  <ActionGroups>
+    <ActionGroup id="civretro-probe-game" scope="game" criteria="always">
+      <Properties>
+        <LoadOrder>500</LoadOrder>
+      </Properties>
+      <Actions>
+        <ImportFiles>
+          <Item>ui/api-dump.js</Item>
+        </ImportFiles>
+        <UIScripts>
+          <Item>ui/api-dump.js</Item>
+        </UIScripts>
+      </Actions>
+    </ActionGroup>
+  </ActionGroups>
+</Mod>
