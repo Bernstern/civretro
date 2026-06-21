@@ -58,14 +58,19 @@ def main():
             elif key == "civretro:index":
                 print(f"[index] sessionId={val.get('sessionId')} turns={val.get('turns')} latest={val.get('latest')}")
             elif key.startswith("civretro:t:"):
-                turn = val.get("turn")
+                gt = val.get("globalTurn", val.get("turn"))
+                at = val.get("ageTurn", val.get("turn"))
                 players = val.get("players", [])
                 err = val.get("error")
                 if err:
-                    print(f"  turn {turn}: ERROR={err}")
+                    print(f"  g{gt}/t{at}: ERROR={err}")
                 else:
-                    psum = ", ".join(f"p{p['id']}({p.get('name','?')[:20]}) gold={p.get('gold')} cities={p.get('numCities')} units={len(p.get('units',[]))}" for p in players)
-                    print(f"  turn {turn}: mapW={val.get('mapW')} mapH={val.get('mapH')} players=[{psum}]")
+                    psum = ", ".join(
+                        f"p{p['id']}({(p.get('leaderName') or p.get('name','?'))[:20]}) "
+                        f"gold={p.get('gold')} cities={p.get('numCities')} units={len(p.get('units',[]))}"
+                        for p in players
+                    )
+                    print(f"  g{gt}/t{at}: mapW={val.get('mapW')} mapH={val.get('mapH')} players=[{psum}]")
         print(f"\nTotal civretro keys: {len(data)}")
         return
 
@@ -80,14 +85,17 @@ def main():
     if args.turn is not None:
         snap = get_civretro(f"civretro:t:{args.turn}")
         if not snap:
-            print(f"No data for turn {args.turn}")
+            print(f"No data for global turn {args.turn}")
         elif args.raw:
             print(json.dumps(snap, indent=2))
         else:
-            print(f"Turn {snap.get('turn')} | Age {snap.get('age')} | Map {snap.get('mapW')}x{snap.get('mapH')}")
+            gt = snap.get("globalTurn", snap.get("turn"))
+            at = snap.get("ageTurn", snap.get("turn"))
+            print(f"Global turn {gt} / age turn {at} | Age {snap.get('age')} | Map {snap.get('mapW')}x{snap.get('mapH')}")
             for pl in snap.get("players", []):
                 yields = pl.get("yields", {})
-                print(f"  Player {pl['id']} ({pl.get('name','?')}) human={pl.get('isHuman')} gold={pl.get('gold')} cities={pl.get('numCities')} units={len(pl.get('units',[]))}")
+                name = pl.get("leaderName") or pl.get("name", "?")
+                print(f"  Player {pl['id']} ({name}) human={pl.get('isHuman')} gold={pl.get('gold')} cities={pl.get('numCities')} units={len(pl.get('units',[]))}")
                 print(f"    yields: food={yields.get('YIELD_FOOD')} prod={yields.get('YIELD_PRODUCTION')} science={yields.get('YIELD_SCIENCE')} culture={yields.get('YIELD_CULTURE')}")
 
     if args.turns or args.players:

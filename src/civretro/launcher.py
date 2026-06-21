@@ -216,8 +216,10 @@ async def wait_for_game_ready(max_wait: int = 180, n_turns: int = 0) -> CDPClien
     # Inject harness config IMMEDIATELY after CDP reconnects, before the
     # loading curtain clears and ContextManager.push("screen-advanced-start")
     # fires. The civretro-harness mod's isEnabled() check gates on this flag.
+    # Inject harness config. The harness reads turns/observeAs/returnAs from
+    # window.__civretro to configure Autoplay. No isEnabled() guard — always active.
     harness_js = (
-        f"window.__civretro = {{enabled: true, turns: {n_turns}, observeAs: -1, returnAs: 0}}"
+        f"window.__civretro = {{turns: {n_turns}, observeAs: -1, returnAs: 0}}"
     )
     try:
         await eval_any(c, harness_js, timeout=5)
@@ -439,7 +441,10 @@ async def _run(args):
         except Exception:
             turn_str = ""
         log.warning("game already running%s", turn_str)
-        answer = input(f"Back out of current game{turn_str} and launch new {args.n_players}p/{args.n_turns}t game? [y/N] ").strip().lower()
+        try:
+            answer = input(f"Back out of current game{turn_str} and launch new {args.n_players}p/{args.n_turns}t game? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
         if answer != "y":
             log.info("aborted by user")
             await c.close()
@@ -477,13 +482,7 @@ async def _run(args):
         log.error("game never became ready")
         sys.exit(1)
 
-    ok = await activate_autoplay(c, args.n_turns)
-    if not ok:
-        log.error("failed to activate Autoplay")
-        sys.exit(1)
-
-    await try_begin_game(c)
-
+    # Harness handles Autoplay activation and Begin screen suppression.
     run_start = time.time()
     result = await wait_for_autoplay_done(c, args.n_turns, prior_session_id=prior_session_id)
     elapsed = time.time() - run_start
