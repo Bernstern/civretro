@@ -8,70 +8,58 @@ This is a Civ7 mod that enables autonomous all-AI games to run without any human
 
 Civ7 has screens that block gameplay even when the `Autoplay` JS object is activated:
 
-- **Begin screen** (`NOTIFICATION_ADVANCED_START`) — fires at game start; waits for a human click before turns advance.
-- **Age Transition screen** (`NOTIFICATION_AGE_TRANSITION`) — fires at each age boundary; waits for a human dedication/legacy choice.
+- **Begin screen** (`NOTIFICATION_ADVANCED_START`) - fires at game start; waits for a human click before turns advance.
+- **Age Transition screen** (`NOTIFICATION_AGE_TRANSITION`) - fires at each age boundary; waits for a human dedication/legacy choice.
 
 ## The fix
 
-### Primary: `ContextManager.push` monkey-patch
+### How the game's own guard works
 
-The harness patches `ContextManager.push` at three points: synchronously at module eval time, inside `engine.whenReady.then()`, and on every `PostGameInitialization` event (which fires after age-transition context reloads). The function is idempotent so calling it multiple times is safe. Any push of a blocked screen name is intercepted and swallowed; `activateAutoplay()` is called instead.
+The game's notification handlers in `notification-handlers.js` (`CreateAdvancedStart.activate()` and `CreateAgeTransition.activate()`) already contain a guard:
 
 ```javascript
-let _cmPatched = false;
-function patchContextManager() {
-    if (_cmPatched) return;
-    if (typeof ContextManager === "undefined") return;
-    const _orig = ContextManager.push.bind(ContextManager);
-    ContextManager.push = function (screenName, ...args) {
-        if (BLOCKED_SCREENS.has(screenName)) {
-            activateAutoplay();
-            return Promise.resolve();
-        }
-        return _orig(screenName, ...args);
-    };
-    _cmPatched = true;
-}
-// Called at eval time, in engine.whenReady.then(), and on PostGameInitialization.
+if (Autoplay.isActive) return;   // skip ContextManager.push entirely
 ```
 
-Blocked names (confirmed from `notification-handlers.js`):
-- `"screen-advanced-start"` — Begin screen
-- `"screen-dedication-selection"` — age transition dedication/legacy chooser
-- `"age-transition-banner"` — age transition overlay
+The harness exploits this: if `Autoplay` is already active when those handlers fire, they short-circuit before ever pushing a screen onto the context stack. No monkey-patching required.
 
-### Secondary: `registerHandler` overrides (inside `engine.whenReady`)
+### Eval-time activation
 
-`registerHandler(key, handler)` internally calls `Game.getHash(key)`. At module eval time `Game` isn't ready — the call throws silently and the handler is never registered. Moving the call inside `engine.whenReady.then()` fixes this. These overrides are belt-and-suspenders behind the ContextManager patch.
+The harness calls `Autoplay.setActive(true)` as the **first statement of the IIFE**, synchronously at module eval time - before any Coherent Gameface notification handler has a chance to run. This is the primary mechanism.
 
-### Belt-and-suspenders: engine event hooks
+### Belt-and-suspenders event hooks
 
-Hooks `PostGameInitialization`, `GameStarted`, `GameAgeEnded`, and `AutoplayEnded` also call `activateAutoplay()` to ensure Autoplay is active as early as possible.
+Coherent Gameface reloads the entire JS context at each age boundary, re-running this script from scratch. The eval-time call handles this automatically. In addition, hooks on `PostGameInitialization`, `GameStarted`, `AutoplayEnded`, and `GameAgeEnded` re-arm Autoplay to cover any edge cases where the context has reset before the IIFE runs.
+
+### Why ContextManager monkey-patching does not work
+
+`ContextManager` is an ES module export in `base-standard`, not a global. It is not accessible from this scope and cannot be patched from here.
 
 ## Always-on
 
-The mod drives every game unconditionally when installed and enabled in the Mods browser. There is no runtime opt-in guard — if you don't want it active, disable it in the Mods menu.
+The mod activates Autoplay unconditionally when installed and enabled in the Mods browser. There is no runtime opt-in guard - if you do not want it active, disable it in the Mods menu.
 
 ## Configuration (optional)
 
-`window.__civretro` can be injected via CDP to control run parameters. All fields are optional — the mod activates Autoplay regardless.
+Config is read from `localStorage` key `civretro:config` (written by the launcher before game launch) or from `window.__civretro` as a CDP-injected fallback. All fields are optional - the mod activates Autoplay regardless.
 
 ```js
-window.__civretro = {
+// civretro:config / window.__civretro schema:
+{
   turns:     20,    // 0 or absent = unlimited
   observeAs: -1,    // -1 = no camera follow; 1000 = full-vision observer
   returnAs:  0,     // player to return control to when autoplay ends
-};
+}
 ```
 
-## Relationship to the civretro mod
+## Relationship to the civretro Recorder mod
 
-`civretro-harness` is **separate** from the main `civretro` (Recorder) mod. The Recorder is what captures and exports game state. The Harness only provides the autonomous-game plumbing that makes unattended recording possible.
+`civretro-harness` is **separate** from the main `civretro` (Recorder) mod. The Recorder captures and exports per-turn game state to `localStorage`. The Harness only provides the autonomous-game plumbing that makes unattended recording possible.
 
 ## Files
 
 ```
 civretro-harness.modinfo   Mod descriptor (LoadOrder 1000, ShowInBrowser 0)
-ui/autoplay-harness.js     ContextManager patch + notification handler overrides
+ui/autoplay-harness.js     Eval-time Autoplay activation + belt-and-suspenders event hooks
 README.md                  This file
 ```

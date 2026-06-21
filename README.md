@@ -8,7 +8,7 @@ Civ 7 runs its UI on Coherent Gameface and exposes a CDP WebSocket on port 9444.
 
 ## Status
 
-Active development. CDP collection confirmed working. All-AI autonomous game loop (Autoplay via harness mod) confirmed through turn 20 in SP.
+Active development. CDP collection confirmed working. All-AI autonomous game loop confirmed working: Begin screen suppression, age-transition screen suppression, and autonomous SP game control via the harness mod are all functional. Turn counting is contiguous across age boundaries: the recorder uses a globalTurn counter and age-aware session detection (civretro:forceNewSession + 90-second lastTs heuristic).
 
 ## Project structure
 
@@ -16,7 +16,7 @@ Active development. CDP collection confirmed working. All-AI autonomous game loo
 src/civretro/        Python CDP collector (launcher, collector state machine, queries)
 tools/               Run scripts (run_game.py, run_harness.sh) and output traces/
 mod/civretro/        CivRetro Recorder mod — localStorage-based per-turn state export
-mod/civretro-harness/  AI Harness mod — suppresses Begin/Age screens, enables Autoplay
+mod/civretro-harness/  AI Harness mod — suppresses Begin/Age screens, enables Autoplay (always-on when installed)
 mod/civretro-probe/  API Dump mod — one-shot global/prototype dump to Automation.log
 deploy-mod.sh        Sync all mods to Windows Civ 7 mods directory (WSL rsync)
 CLAUDE.md            Agent context — architecture quick-ref and link to living Notion notes
@@ -32,7 +32,7 @@ python tools/run_game.py --n-turns 20 --n-players 4
 ./tools/run_harness.sh
 ```
 
-Enable `CivRetro Recorder` and `CivRetro AI Harness` in the Mods menu before starting. Deploy with `bash deploy-mod.sh` after any mod changes.
+Enable `CivRetro Recorder` and `CivRetro AI Harness` in the Mods menu before starting. After any mod changes, copy the mod folder directly to `%LOCALAPPDATA%\Firaxis Games\Sid Meier's Civilization VII\Mods\` (or use the Write tool if running Claude Code) — `deploy-mod.sh` uses WSL rsync and does not work with Windows mount permissions.
 
 ## Requirements
 

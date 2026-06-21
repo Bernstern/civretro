@@ -6,6 +6,26 @@ Also provides main() / build_arg_parser() used by both tools/run_game.py (direct
 invocation) and the run-game console script entry point (main_cli).
 """
 
+# Launcher <-> Game Protocol
+#
+# Pre-launch (menu context, shared fs://game localStorage):
+#   civretro:config          = JSON {turns, observeAs, returnAs}
+#   civretro:forceNewSession = "1"   (consumed by recorder on first eval)
+#
+# Post-load injection (CDP -> game context):
+#   window.__civretro        = {turns, observeAs, returnAs}  (fallback)
+#
+# Harness mod (autoplay-harness.js):
+#   Reads civretro:config at eval time -> Autoplay.setActive(true)
+#   Game's own notification handlers check Autoplay.isActive and bail out
+#
+# Recorder mod (recorder.js):
+#   Writes civretro:index    = {sessionId, turns[], totalTurns, lastTs, ages[]}
+#   Writes civretro:t:{N}    = omniscient snapshot for global turn N
+#
+# Launcher polls civretro:index.totalTurns every 5s until >= n_turns,
+# then sends exitToMainMenu.
+
 import argparse
 import asyncio
 import json
