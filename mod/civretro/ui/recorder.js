@@ -27,13 +27,19 @@
     // -------------------------------------------------------------------------
 
     (function initSession() {
+        var forceNew = false;
+        try {
+            forceNew = localStorage.getItem('civretro:forceNewSession') === '1';
+            if (forceNew) localStorage.removeItem('civretro:forceNewSession');
+        } catch (e) {}
+
         try {
             var idxRaw = localStorage.getItem("civretro:index");
             if (idxRaw) {
                 var idx = JSON.parse(idxRaw);
                 var ageMs = Date.now() - (idx.lastTs || 0);
                 // If the last turn was written < 90s ago, assume age transition — resume
-                if (idx.sessionId && idx.turns && idx.turns.length > 0 && ageMs < 90000) {
+                if (!forceNew && idx.sessionId && idx.turns && idx.turns.length > 0 && ageMs < 90000) {
                     sessionId = idx.sessionId;
                     globalTurn = idx.totalTurns || idx.turns.length;
                     // Restore last known age from index so we don't emit a spurious age marker

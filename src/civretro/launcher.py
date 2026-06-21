@@ -237,6 +237,7 @@ async def wait_for_game_ready(max_wait: int = 180, n_turns: int = 0) -> CDPClien
     if c is None:
         return None
 
+    # Belt-and-suspenders: also written to localStorage before launch (see _run)
     # Inject optional Autoplay config for the harness mod (turns/observeAs/returnAs).
     harness_js = (
         f"window.__civretro = {{turns: {n_turns}, observeAs: -1, returnAs: 0}}"
@@ -274,6 +275,20 @@ async def wait_for_game_ready(max_wait: int = 180, n_turns: int = 0) -> CDPClien
             log.debug("[%ds] %s", i, ready)
 
     return None
+
+
+async def _check_harness(c: CDPClient, timeout: int = 15) -> bool:
+    """Poll Autoplay.isActive for up to timeout seconds; warn if harness hasn't activated it."""
+    for i in range(timeout):
+        await asyncio.sleep(1)
+        active = await safe_eval(c, "typeof Autoplay !== 'undefined' && Autoplay.isActive", timeout=5)
+        if active is True or active == "true" or active == True:
+            log.info("harness confirmed active (Autoplay.isActive=true) after %ds", i + 1)
+            return True
+        if i == 4:
+            log.warning("Autoplay not yet active after 5s — are both mods enabled in the Mods menu?")
+    log.error("harness not active after %ds — civretro-harness mod may not be enabled", timeout)
+    return False
 
 
 _HANG_WARN_S  = 120   # warn if no new turns for this many seconds
@@ -436,6 +451,17 @@ async def _run(cfg: RunConfig):
     except Exception:
         pass
 
+    # Write config and new-session flag to localStorage (fs://game origin persists into game context)
+    config_js = (
+        f"localStorage.setItem('civretro:config', JSON.stringify({{turns:{cfg.n_turns},observeAs:-1,returnAs:0}}));"
+        f"localStorage.setItem('civretro:forceNewSession','1')"
+    )
+    try:
+        await safe_eval(c, config_js, timeout=5)
+        log.info("civretro config written to localStorage (turns=%d)", cfg.n_turns)
+    except Exception as e:
+        log.warning("localStorage config write failed: %s", e)
+
     log.info("launching game...")
     ok = await launch_game(
         c, cfg.n_players, cfg.seed,
@@ -455,6 +481,9 @@ async def _run(cfg: RunConfig):
     if c is None:
         log.error("game never became ready")
         raise RunError("game never became ready")
+
+    await _check_harness(c)
+    # (don't raise on failure — proceed anyway, warn is enough)
 
     # Harness handles Autoplay activation and Begin screen suppression.
     log.info("── collecting ──")

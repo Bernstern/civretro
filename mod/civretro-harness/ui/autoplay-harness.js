@@ -34,7 +34,13 @@
 (function () {
     const TAG = "CIVRETRO:harness";
 
-    function cfg() { return window.__civretro || {}; }
+    function cfg() {
+        try {
+            var stored = localStorage.getItem('civretro:config');
+            if (stored) return JSON.parse(stored);
+        } catch (e) {}
+        return window.__civretro || {};
+    }
 
     // -------------------------------------------------------------------------
     // Autoplay configuration and activation
