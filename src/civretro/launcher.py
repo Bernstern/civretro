@@ -255,11 +255,13 @@ async def wait_for_game_ready(max_wait: int = 180, n_turns: int = 0) -> CDPClien
 
 
 _BEGIN_CLICK_JS = """(function(){
-  var LABELS = /^(begin|start|play|continue|ok|launch)$/i;
-  var candidates = Array.from(document.querySelectorAll('button, [class*="btn"], [class*="button"]'));
+  var LABELS = /^(begin|start|start game|play|continue|ok|launch|next)$/i;
+  var candidates = Array.from(document.querySelectorAll(
+    'button, [class*="btn"], [class*="button"], [class*="action"], fxs-button'
+  ));
   for (var i = 0; i < candidates.length; i++) {
     var el = candidates[i];
-    var txt = (el.textContent || el.innerText || '').trim();
+    var txt = (el.textContent || el.innerText || el.getAttribute('caption') || '').trim();
     if (LABELS.test(txt)) {
       el.click();
       return 'clicked:' + txt;
@@ -269,15 +271,20 @@ _BEGIN_CLICK_JS = """(function(){
 })()"""
 
 
-async def try_begin_game(c: CDPClient) -> bool:
-    """Attempt to dismiss the post-load 'Begin' screen via DOM click."""
-    try:
-        result = await asyncio.wait_for(eval_any(c, _BEGIN_CLICK_JS), timeout=5)
-        log.info("begin screen: %s", result)
-        return isinstance(result, str) and result.startswith("clicked:")
-    except Exception as e:
-        log.debug("begin click failed: %s", e)
-        return False
+async def try_begin_game(c: CDPClient, max_attempts: int = 8, interval: float = 2.0) -> bool:
+    """Retry DOM click for Begin/Start screen for up to max_attempts × interval seconds."""
+    for attempt in range(max_attempts):
+        try:
+            result = await asyncio.wait_for(eval_any(c, _BEGIN_CLICK_JS), timeout=5)
+            log.info("begin screen attempt %d/%d: %s", attempt + 1, max_attempts, result)
+            if isinstance(result, str) and result.startswith("clicked:"):
+                return True
+        except Exception as e:
+            log.debug("begin click attempt %d failed: %s", attempt + 1, e)
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(interval)
+    log.warning("begin screen: no button found after %d attempts", max_attempts)
+    return False
 
 
 async def activate_autoplay(c: CDPClient, n_turns: int) -> bool:
@@ -298,17 +305,35 @@ async def activate_autoplay(c: CDPClient, n_turns: int) -> bool:
     return result and "true" in str(result)
 
 
-async def wait_for_autoplay_done(c: CDPClient, n_turns: int, max_wait: int = 7200) -> dict:
+_HANG_WARN_S  = 120   # warn if no new turns for this many seconds
+_HANG_ABORT_S = 300   # abort if no new turns for this many seconds
+
+
+async def wait_for_autoplay_done(
+    c: CDPClient,
+    n_turns: int,
+    prior_session_id: str | None = None,
+    max_wait: int = 7200,
+) -> dict:
     """
     Poll until the recorder has captured n_turns, then actively exit to menu.
 
-    Primary signal: civretro:index in localStorage (authoritative, set by recorder mod).
-    Fallback: Game.turn advance counting (used before first recorder write).
-    Works identically for SP and MP — does not rely on Autoplay.isActive.
+    prior_session_id: sessionId from civretro:index before launching. We wait
+    until the index shows a *new* sessionId before counting turns — prevents
+    stale data from a previous run triggering an instant exit.
+
+    Primary signal: civretro:index (authoritative, written by recorder mod).
+    Fallback:       Game.turn advance counting (before recorder writes first entry).
+    Hang watchdog:  warns at _HANG_WARN_S, aborts at _HANG_ABORT_S with no progress.
     """
-    log.info("waiting for recorder to capture %d turns...", n_turns)
+    log.info("waiting for recorder to capture %d turns (prior_session=%s)...",
+             n_turns, prior_session_id)
+
+    session_confirmed = prior_session_id is None
     last_turn = None
     turn_advances = 0
+    last_progress_t = time.monotonic()
+    last_captured = 0
 
     for _ in range(0, max_wait, 5):
         await asyncio.sleep(5)
@@ -318,24 +343,46 @@ async def wait_for_autoplay_done(c: CDPClient, n_turns: int, max_wait: int = 720
         if idx_raw and idx_raw not in ("null", "undefined"):
             try:
                 idx = json.loads(idx_raw)
+                current_session = idx.get("sessionId")
+
+                if not session_confirmed:
+                    if current_session and current_session != prior_session_id:
+                        session_confirmed = True
+                        log.info("new recorder session: %s", current_session)
+                    else:
+                        log.debug("waiting for new session (still %s)", current_session)
+                        continue
+
                 captured = len(idx.get("turns", []))
-                if captured % 5 == 0 and captured > 0:
-                    log.info("recorder: %d/%d turns captured", captured, n_turns)
+                if captured > last_captured:
+                    last_captured = captured
+                    last_progress_t = time.monotonic()
+                    if captured % 5 == 0 or captured == n_turns:
+                        log.info("recorder: %d/%d turns", captured, n_turns)
+
                 if captured >= n_turns:
                     log.info("recorder done (%d turns) — sending exitToMainMenu", captured)
                     try:
                         await eval_any(c, 'engine.call("exitToMainMenu")', timeout=5)
                     except Exception:
                         pass
-                    return {"turns_captured": captured, "session_id": idx.get("sessionId")}
+                    return {"turns_captured": captured, "session_id": current_session}
+
+                stall_s = time.monotonic() - last_progress_t
+                if stall_s > _HANG_ABORT_S:
+                    log.error("no progress for %.0fs — aborting", stall_s)
+                    return {"turns_captured": captured, "timed_out": True}
+                if stall_s > _HANG_WARN_S and int(stall_s) % 30 < 5:
+                    log.warning("no progress for %.0fs (stalled at turn %d?)", stall_s, captured)
                 continue
             except Exception:
                 pass
 
         # Fallback: Game.turn advance tracking (before recorder writes first entry)
-        snap_raw = await safe_eval(
-            c, "JSON.stringify({turn: Game.turn})", timeout=10,
-        )
+        if not session_confirmed:
+            continue
+
+        snap_raw = await safe_eval(c, "JSON.stringify({turn: Game.turn})", timeout=10)
         if not snap_raw:
             continue
         try:
@@ -346,9 +393,15 @@ async def wait_for_autoplay_done(c: CDPClient, n_turns: int, max_wait: int = 720
         turn = snap.get("turn", 0)
         if last_turn is not None and turn != last_turn:
             turn_advances += 1
+            last_progress_t = time.monotonic()
             if turn_advances % 5 == 0:
                 log.info("fallback: turn=%d advances=%d/%d", turn, turn_advances, n_turns)
         last_turn = turn
+
+        stall_s = time.monotonic() - last_progress_t
+        if stall_s > _HANG_ABORT_S:
+            log.error("fallback: no progress for %.0fs — aborting", stall_s)
+            return {"turns_captured": turn_advances, "timed_out": True}
 
         if turn_advances >= n_turns:
             log.info("fallback: %d advances → exitToMainMenu", turn_advances)
@@ -394,6 +447,17 @@ async def _run(args):
 
     c = await ensure_at_menu(c)
 
+    # Capture old session ID before launching so wait_for_autoplay_done can
+    # ignore stale localStorage data from the previous game.
+    prior_session_id = None
+    try:
+        old_idx = await safe_eval(c, "localStorage.getItem('civretro:index')", timeout=5)
+        if old_idx and old_idx not in ("null", "undefined"):
+            prior_session_id = json.loads(old_idx).get("sessionId")
+            log.info("prior recorder session: %s", prior_session_id)
+    except Exception:
+        pass
+
     log.info("launching game...")
     ok = await launch_game(
         c, args.n_players, args.seed,
@@ -421,7 +485,7 @@ async def _run(args):
     await try_begin_game(c)
 
     run_start = time.time()
-    result = await wait_for_autoplay_done(c, args.n_turns)
+    result = await wait_for_autoplay_done(c, args.n_turns, prior_session_id=prior_session_id)
     elapsed = time.time() - run_start
 
     # exitToMainMenu was sent inside wait_for_autoplay_done; confirm menu reached
