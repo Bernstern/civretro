@@ -2,9 +2,9 @@
 //
 // Session model:
 //   One sessionId per game. Age transitions reload the UI context (Coherent
-//   Gameface), which re-runs this script. We detect age transitions by checking
-//   whether the existing session's last write timestamp is recent (< 90s), and
-//   resume that session rather than creating a new one.
+//   Gameface), which re-runs this script. We detect age transitions by comparing
+//   Game.age against the age stored in the index (definitive signal), with a
+//   20-minute fallback window for same-age reloads (save/load, UI reload).
 //
 // Turn keys use a globalTurn counter (total TurnEnd events this game, starting
 // at 1) instead of Game.turn, so turn numbers stay unique across age resets.
@@ -37,17 +37,22 @@
             var idxRaw = localStorage.getItem("civretro:index");
             if (idxRaw) {
                 var idx = JSON.parse(idxRaw);
-                var ageMs = Date.now() - (idx.lastTs || 0);
-                // If the last turn was written < 90s ago, assume age transition — resume
-                if (!forceNew && idx.sessionId && idx.turns && idx.turns.length > 0 && ageMs < 90000) {
-                    sessionId = idx.sessionId;
-                    globalTurn = idx.totalTurns || idx.turns.length;
-                    // Restore last known age from index so we don't emit a spurious age marker
-                    if (idx.ages && idx.ages.length > 0) {
-                        currentAge = idx.ages[idx.ages.length - 1].age;
+                if (!forceNew && idx.sessionId && idx.turns && idx.turns.length > 0) {
+                    var ageMs = Date.now() - (idx.lastTs || 0);
+                    // Primary signal: if Game.age differs from the stored age, it's an age
+                    // transition — resume unconditionally. Fallback: same-age reload within
+                    // 20 minutes (covers save/load and UI reloads within the same age).
+                    var ageChanged = (typeof Game !== "undefined") && idx.lastAge !== undefined && idx.lastAge !== Game.age;
+                    if (ageChanged || ageMs < 1200000) {
+                        sessionId = idx.sessionId;
+                        globalTurn = idx.totalTurns || idx.turns.length;
+                        if (idx.ages && idx.ages.length > 0) {
+                            currentAge = idx.ages[idx.ages.length - 1].age;
+                        }
+                        Automation.log("CIVRETRO:session:resume id=" + sessionId + " globalTurn=" + globalTurn
+                                       + " ageChanged=" + ageChanged + " ageMs=" + Math.round(ageMs / 1000) + "s");
+                        return;
                     }
-                    Automation.log("CIVRETRO:session:resume id=" + sessionId + " globalTurn=" + globalTurn + " currentAge=" + currentAge);
-                    return;
                 }
             }
         } catch (e) {}
@@ -243,11 +248,23 @@
     function updateIndex(snap) {
         try {
             var raw = localStorage.getItem("civretro:index");
-            var idx = raw ? JSON.parse(raw) : { sessionId: sessionId, turns: [], totalTurns: 0, latest: null, lastTs: 0, ages: [] };
+            var idx = raw ? JSON.parse(raw) : null;
+            // Coherent Gameface's native JSON parser can return arrays that don't
+            // inherit from the current realm's Array.prototype, causing .push to
+            // throw "is not a function". Always re-wrap turns and ages into new
+            // native arrays. Also reset the index if it belongs to a different session
+            // (stale autoplay index left in localStorage).
+            if (!idx || idx.sessionId !== sessionId) {
+                idx = { sessionId: sessionId, turns: [], totalTurns: 0, latest: null, lastTs: 0, ages: [] };
+            } else {
+                idx.turns = Array.isArray(idx.turns) ? idx.turns.slice() : [];
+                idx.ages  = Array.isArray(idx.ages)  ? idx.ages.slice()  : [];
+            }
             idx.turns.push(globalTurn);
             idx.totalTurns = globalTurn;
             idx.latest = globalTurn;
             idx.lastTs = Date.now();
+            idx.lastAge = (snap && snap.age !== undefined) ? snap.age : Game.age;
 
             // Detect age transitions; snap.age or Game.age indicates the current age
             var snapAge = (snap && snap.age !== undefined) ? snap.age : Game.age;
@@ -256,7 +273,6 @@
                 currentAge = snapAge;
             } else if (snapAge !== currentAge) {
                 // Age changed — push a transition marker at the current globalTurn
-                if (!idx.ages) idx.ages = [];
                 idx.ages.push({ age: snapAge, atGlobalTurn: globalTurn, ts: Date.now() });
                 currentAge = snapAge;
             }
@@ -317,6 +333,9 @@
             var ageTurn = (data && data.turn !== undefined) ? data.turn : Game.turn;
             var snap = captureOmniscient(ageTurn);
             localStorage.setItem("civretro:t:" + globalTurn, JSON.stringify(snap));
+            if (globalTurn === 1) {
+                localStorage.setItem("civretro:firstTurn", JSON.stringify({ sessionId: sessionId, ts: Date.now(), ageTurn: ageTurn }));
+            }
             updateIndex(snap);
             Automation.log("CIVRETRO:turn:" + ageTurn + " global=" + globalTurn);
         } catch (e) {
@@ -333,6 +352,19 @@
             Automation.log("CIVRETRO:localTurn:" + Game.turn);
         } catch (e) {}
     }
+
+    // -------------------------------------------------------------------------
+    // Heartbeat — written every 30s regardless of game events.
+    // If heartbeat.ts is recent but index.lastTs is stale, TurnEnd isn't firing.
+    // -------------------------------------------------------------------------
+
+    setInterval(function() {
+        try {
+            localStorage.setItem("civretro:heartbeat", JSON.stringify({
+                sessionId: sessionId, globalTurn: globalTurn, ts: Date.now()
+            }));
+        } catch(e) { Automation.log("CIVRETRO:heartbeat:ERR:" + e.message); }
+    }, 30000);
 
     // -------------------------------------------------------------------------
     // Register event listeners
