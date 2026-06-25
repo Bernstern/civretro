@@ -90,8 +90,23 @@
         }
     }
 
+    function isHumanGame() {
+        try {
+            var ids = Players.getAliveMajorIds();
+            for (var i = 0; i < ids.length; i++) {
+                var p = Players.get(ids[i]);
+                if (p && p.isHuman) return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
     function activateAutoplay() {
         try {
+            if (isHumanGame()) {
+                log.warn('human player detected — harness is a no-op');
+                return;
+            }
             applyConfig();
             if (!Autoplay.isActive) {
                 Autoplay.setActive(true);
