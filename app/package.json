@@ -1,0 +1,10 @@
+{
+  "name": "@civretro/viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CivRetro replay viewer (stub) — will load exporter NDJSON and render a map + turn scrubber.",
+  "dependencies": {
+    "@civretro/types": "workspace:*"
+  }
+}

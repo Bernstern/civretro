@@ -1,0 +1,9 @@
+{
+  "name": "@civretro/parser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "civretro-parse": "./dist/cli.js"
+  }
+}

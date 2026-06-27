@@ -20,7 +20,7 @@ done
 
 deploy_mod() {
     local name="$1"
-    local src="${PROJECT_ROOT}/mod/${name}/"
+    local src="${PROJECT_ROOT}/mods/${name}/"
     local dest="${MODS_ROOT}/${name}/"
     mkdir -p "$dest"
     echo "Syncing ${name} -> ${dest}"

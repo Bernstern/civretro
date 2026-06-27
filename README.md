@@ -12,24 +12,28 @@ Active development. CDP collection confirmed working. All-AI autonomous game loo
 
 ## Project structure
 
+Everything off-game is one TypeScript codebase (pnpm workspaces); the only
+non-TS code is `mods/`, which must be raw JS because Coherent Gameface loads it
+directly with no build step. See [AGENTS.md](AGENTS.md) for the TS conventions.
+
 ```
-src/civretro/        Python CDP collector (launcher, collector state machine, queries)
-tools/               Run scripts (run_game.py, run_harness.sh) and output traces/
-mod/civretro/        CivRetro Recorder mod — localStorage-based per-turn state export
-mod/civretro-harness/  AI Harness mod — suppresses Begin/Age screens, enables Autoplay (always-on when installed)
-mod/civretro-probe/  API Dump mod — one-shot global/prototype dump to Automation.log
-deploy-mod.sh        Sync all mods to Windows Civ 7 mods directory (WSL rsync)
-CLAUDE.md            Agent context — architecture quick-ref and link to living Notion notes
+mods/civretro/          CivRetro Recorder — localStorage per-turn state export (the only shipped mod)
+mods/civretro-harness/  AI Harness — suppresses Begin/Age screens, enables Autoplay (dev only)
+mods/civretro-probe/    API Dump — one-shot global/prototype dump to Automation.log (dev only)
+shared/types/           Zod schema contract + inferred types (the spine everything imports)
+shared/exporter/        LocalStorage.sqlite → NDJSON
+shared/parser/          .Civ7Save binary decoder
+shared/launcher/        CDP game automation (drives an all-AI game, polls the recorder)
+app/                    Replay viewer (stub)
+fixtures/               Committed test data: traces/ (recorder NDJSON), saves/ (.Civ7Save)
+deploy-mod.sh           Sync mods to the Windows Civ 7 mods directory (WSL rsync)
 ```
 
 ## Running the harness
 
 ```sh
-# With Civ 7 running, from WSL project root:
-python tools/run_game.py --n-turns 20 --n-players 4
-
-# Or via wrapper:
-./tools/run_harness.sh
+# With Civ 7 running (-dev flag), from the WSL project root:
+pnpm launch -- --n-turns 20 --n-players 4
 ```
 
 Enable `CivRetro Recorder` and `CivRetro AI Harness` in the Mods menu before starting. After any mod changes, copy the mod folder directly to `%LOCALAPPDATA%\Firaxis Games\Sid Meier's Civilization VII\Mods\` (or use the Write tool if running Claude Code) — `deploy-mod.sh` uses WSL rsync and does not work with Windows mount permissions.
@@ -37,5 +41,26 @@ Enable `CivRetro Recorder` and `CivRetro AI Harness` in the Mods menu before sta
 ## Requirements
 
 - Civ 7 on Windows (Steam) with `-dev` launch flag for CDP access
-- Python 3.10+ in WSL for the collector
+- Node 20+ and pnpm in WSL (`corepack enable` provides pnpm)
 - No AppOptions.txt changes needed — port 9444 is active in all retail builds
+
+## TypeScript tooling
+
+A pnpm-workspaces monorepo. `shared/types` is the keystone: Zod schemas derived
+from `mods/civretro/ui/recorder.js`, validated against the live
+`LocalStorage.sqlite`, older deployed recorders, and the legacy
+`fixtures/traces/*.ndjson`. The exporter and parser both normalize toward this
+contract so the viewer can stay source-agnostic.
+
+```sh
+pnpm install        # one-time
+pnpm typecheck      # tsc --noEmit — the primary gate
+pnpm check          # biome (lint + format); pnpm fix to apply
+pnpm test           # vitest across shared/*
+pnpm build          # tsc -b → shared/*/dist
+
+pnpm export -- --latest        # full NDJSON from the recorder's LocalStorage.sqlite
+pnpm export -- --turns         # list captured turns with a brief summary
+pnpm parse  -- <save.Civ7Save> # decode a save file
+pnpm launch -- --n-turns 20    # drive a game via CDP (needs Civ 7 on :9444)
+```

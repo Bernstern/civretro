@@ -66,3 +66,8 @@ pip-delete-this-directory.txt
 # Environments
 .env
 .env.*
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+.vitest/
