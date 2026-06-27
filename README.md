@@ -39,3 +39,33 @@ Enable `CivRetro Recorder` and `CivRetro AI Harness` in the Mods menu before sta
 - Civ 7 on Windows (Steam) with `-dev` launch flag for CDP access
 - Python 3.10+ in WSL for the collector
 - No AppOptions.txt changes needed — port 9444 is active in all retail builds
+
+## TypeScript tooling
+
+An npm-workspaces monorepo under `packages/` holds the data-layer tooling. The
+game mod in `mod/` and the Python launcher (`src/civretro/`, `tools/run_game.py`)
+are **not** part of this workspace and stay as-is.
+
+- **`packages/types`** — Zod schemas and inferred types for every recorder
+  structure (`civretro:session`, `civretro:index`, `civretro:t:{n}`,
+  `civretro:map:{age}`) plus the exporter's tagged NDJSON envelope records.
+  Schemas are derived from `mod/civretro/ui/recorder.js` and validated against the
+  live `LocalStorage.sqlite`, older deployed recorders, and the legacy
+  `tools/traces/*.ndjson` fixtures.
+- **`packages/exporter`** — replaces `tools/read_localstorage.py`. Reads the
+  recorder's `LocalStorage.sqlite` with `better-sqlite3` and emits NDJSON: one
+  `session`, one `map_snapshot` per age, then one `turn` per global turn ordered
+  by `globalTurn`.
+
+```sh
+npm install        # one-time
+npm test           # vitest across all packages
+npm run typecheck  # tsc --noEmit, no build required
+npm run build      # tsc -b → packages/*/dist
+
+npm run export -- --latest      # full NDJSON to stdout
+npm run export -- --turns       # list captured turns with a brief summary
+npm run export -- --turn 5      # pretty-print one turn snapshot
+npm run export -- --all         # summarize all civretro keys (default)
+npm run export -- --db <path>   # override the LocalStorage.sqlite path
+```

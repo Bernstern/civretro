@@ -1,0 +1,20 @@
+{
+  "name": "civretro-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript tooling for CivRetro — schemas and NDJSON exporter over the recorder's LocalStorage.sqlite.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run --reporter=verbose",
+    "typecheck": "tsc --noEmit -p tsconfig.base.json",
+    "build": "tsc -b packages/types packages/exporter",
+    "export": "tsx packages/exporter/src/cli.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}
