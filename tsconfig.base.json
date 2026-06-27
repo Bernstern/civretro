@@ -6,8 +6,14 @@
     "lib": ["ES2022"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
+    "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
@@ -16,8 +22,8 @@
     "declaration": true,
     "baseUrl": ".",
     "paths": {
-      "@civretro/types": ["packages/types/src/index.ts"]
+      "@civretro/types": ["shared/types/src/index.ts"]
     }
   },
-  "include": ["packages/*/src/**/*"]
+  "include": ["shared/*/src/**/*", "app/src/**/*"]
 }

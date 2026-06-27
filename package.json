@@ -2,19 +2,25 @@
   "name": "civretro-tools",
   "version": "0.1.0",
   "private": true,
-  "description": "TypeScript tooling for CivRetro — schemas and NDJSON exporter over the recorder's LocalStorage.sqlite.",
-  "workspaces": [
-    "packages/*"
-  ],
+  "description": "All-TypeScript CivRetro tooling — schemas, NDJSON exporter, save parser, and CDP game launcher.",
   "scripts": {
-    "test": "vitest run --reporter=verbose",
     "typecheck": "tsc --noEmit -p tsconfig.base.json",
-    "build": "tsc -b packages/types packages/exporter",
-    "export": "tsx packages/exporter/src/cli.ts"
+    "check": "biome check",
+    "fix": "biome check --write",
+    "test": "vitest run --reporter=verbose",
+    "build": "tsc -b shared/types shared/exporter shared/parser shared/launcher",
+    "export": "tsx shared/exporter/src/cli.ts",
+    "parse": "tsx shared/parser/src/cli.ts",
+    "launch": "tsx shared/launcher/src/cli.ts"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["better-sqlite3", "esbuild"]
   }
 }
