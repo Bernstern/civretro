@@ -490,11 +490,11 @@ async function main() {
   const result = await pollUntilDone(cdp, runId, args.turns, args.timeoutMs);
 
   log("exiting to main menu...");
-  // exitToMainMenu tears down the game context. The CDP eval may time out or
-  // throw as the context disappears — that's fine, we just need the command
-  // dispatched. Don't poll isInShell afterwards: each poll carries a 10s eval
-  // timeout and 15 polls × 10s = 2.5 min hang while the context is in limbo.
-  try { await cdp.eval('engine.call("exitToMainMenu")', 2000); } catch {}
+  // Use the default 10s timeout (same as exit.ts standalone tool). The 2s
+  // timeout was too short after an age transition — the new context is still
+  // initializing and the eval would time out silently, leaving autoplay
+  // running indefinitely.
+  try { await cdp.eval('engine.call("exitToMainMenu")'); } catch {}
   await cdp.close();
   await sleep(3000);
 
