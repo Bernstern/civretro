@@ -1,4 +1,5 @@
 import { CDP } from "./cdp.js";
+import { readLSJson } from "./sqlite.js";
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -20,12 +21,18 @@ function parseArgs() {
     const i = argv.indexOf(flag);
     return i >= 0 && argv[i + 1] ? argv[i + 1]! : def;
   };
+  const turns = parseInt(get("--turns", "10"), 10);
+  // Default timeout: 8s/turn + 90s buffer. Online speed at 2 players runs ~4s/turn;
+  // 2× headroom keeps the bound tight enough to catch hangs quickly.
+  const defaultTimeoutS = turns * 8 + 90;
+  const timeoutS = parseInt(get("--timeout", String(defaultTimeoutS)), 10);
   return {
-    turns:   parseInt(get("--turns",   "10"), 10),
-    players: parseInt(get("--players", "2"),  10),
-    speed:   get("--speed",    "online"),
-    mapSize: get("--map-size", "tiny"),
-    seed:    argv.includes("--seed") ? parseInt(get("--seed", "0"), 10) : null,
+    turns,
+    players:   parseInt(get("--players", "2"), 10),
+    speed:     get("--speed",    "online"),
+    mapSize:   get("--map-size", "tiny"),
+    seed:      argv.includes("--seed") ? parseInt(get("--seed", "0"), 10) : null,
+    timeoutMs: timeoutS * 1000,
   };
 }
 
@@ -89,6 +96,7 @@ interface GameOverSignal {
   ageTurn:     number | null;
   globalTurn:  number | null;
   ts:          number;
+  runId?:      string;  // present in harness v2+; used to reject stale signals
 }
 
 function generateRunId(): string {
@@ -109,7 +117,12 @@ async function removeLS(cdp: CDP, key: string): Promise<void> {
 // Game setup
 // ---------------------------------------------------------------------------
 
-async function configureAndLaunch(cdp: CDP, args: ReturnType<typeof parseArgs>): Promise<void> {
+interface LaunchContext {
+  config: HarnessConfig;
+  state:  HarnessState;
+}
+
+async function configureAndLaunch(cdp: CDP, args: ReturnType<typeof parseArgs>): Promise<LaunchContext> {
   const runId = generateRunId();
 
   const config: HarnessConfig = {
@@ -172,6 +185,7 @@ async function configureAndLaunch(cdp: CDP, args: ReturnType<typeof parseArgs>):
 
   log("launching game...");
   await cdp.eval("Network.hostGame(ServerType.SERVER_TYPE_NONE)");
+  return { config, state };
 }
 
 // ---------------------------------------------------------------------------
@@ -268,41 +282,38 @@ async function dismissNotifications(cdp: CDP): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// Recorder index helpers
+// Recorder index + game-over — read from sqlite, not CDP eval.
+//
+// The recorder and harness mods write to localStorage from within the game's
+// mod execution context. CDP Runtime.evaluate runs in the main page context.
+// These share the same sqlite backing store but have separate in-memory caches,
+// so CDP eval sees stale data. Reading sqlite directly gives live values.
 // ---------------------------------------------------------------------------
 
 interface RecorderIndex {
-  session:  string;
-  turns:    number[];
-  lastTurn: number;
+  sessionId:  string;
+  turns:      number[];
+  latest:     number;
+  totalTurns: number;
 }
 
-async function readRecorderIndex(cdp: CDP): Promise<RecorderIndex | null> {
-  const raw = await tryEval<string>(
-    cdp,
-    `localStorage.getItem('civretro:index')`,
-    null
-  );
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as RecorderIndex;
-  } catch {
-    return null;
-  }
+function readRecorderIndex(): RecorderIndex | null {
+  return readLSJson<RecorderIndex>("civretro:index");
 }
 
-async function readGameOver(cdp: CDP): Promise<GameOverSignal | null> {
-  const raw = await tryEval<string>(
-    cdp,
-    `localStorage.getItem('civretro:game_over')`,
-    null
-  );
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as GameOverSignal;
-  } catch {
+function readGameOver(runId: string, debug = false): GameOverSignal | null {
+  const signal = readLSJson<GameOverSignal>("civretro:game_over");
+  if (debug) log(`  game_over sqlite: ${JSON.stringify(signal)}`);
+  if (!signal) return null;
+  if (!signal.reason || typeof signal.reason !== "string") {
+    if (debug) log(`  game_over rejected: no valid reason field`);
     return null;
   }
+  if (signal.runId && signal.runId !== runId) {
+    if (debug) log(`  game_over rejected: runId mismatch (got ${signal.runId}, want ${runId})`);
+    return null;
+  }
+  return signal;
 }
 
 // ---------------------------------------------------------------------------
@@ -315,9 +326,17 @@ interface PollResult {
   elapsed: number;
 }
 
-async function pollUntilDone(cdp: CDP, targetTurns: number, timeoutMs: number): Promise<PollResult> {
+async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeoutMs: number): Promise<PollResult> {
   const start = Date.now();
   const deadline = start + timeoutMs;
+  // No recorder progress for half the total budget (min 60s) → abort as hung.
+  const hangMs = Math.max(60_000, timeoutMs / 2);
+
+  // Snapshot the session that was in the index when the game loaded.
+  // The recorder will switch to a new sessionId once it fires GameStarted for
+  // this game; we ignore turn counts until that happens so stale sqlite data
+  // from the previous game doesn't trigger a false turn-limit hit.
+  const priorSession = readRecorderIndex()?.sessionId ?? null;
 
   let lastProgressAt = Date.now();
   let lastRecordedTurn = -1;
@@ -326,7 +345,7 @@ async function pollUntilDone(cdp: CDP, targetTurns: number, timeoutMs: number): 
   while (Date.now() < deadline) {
     await sleep(2000);
 
-    // 1. Keep Autoplay active. The harness owns turn-limit math via TurnEnd.
+    // 1. Keep Autoplay active.
     const apState = await activateAutoplay(cdp);
     if (apState !== lastAutoplayState) {
       log(`autoplay: ${apState}`);
@@ -336,18 +355,34 @@ async function pollUntilDone(cdp: CDP, targetTurns: number, timeoutMs: number): 
     // 2. Dismiss pending notifications
     await dismissNotifications(cdp);
 
-    // 3. Read recorder index
-    const idx = await readRecorderIndex(cdp);
-    if (idx !== null) {
-      if (idx.lastTurn !== lastRecordedTurn) {
-        log(`recorder: session=${idx.session} turn=${idx.lastTurn}/${targetTurns} (${idx.turns.length} turns recorded)`);
-        lastRecordedTurn = idx.lastTurn;
+    // 3. Read recorder index — source of truth for global turns played.
+    const idx = readRecorderIndex();
+    if (idx !== null && idx.sessionId !== priorSession) {
+      const currentTurn = idx.latest ?? idx.totalTurns ?? 0;
+      if (currentTurn !== lastRecordedTurn) {
+        log(`recorder: session=${idx.sessionId} turn=${currentTurn}/${targetTurns} (${idx.turns?.length ?? 0} turns recorded)`);
+        lastRecordedTurn = currentTurn;
         lastProgressAt = Date.now();
+      }
+
+      // Driver-enforced turn limit — authoritative, since the harness's
+      // in-harness localStorage counter loses state across age reloads.
+      if (targetTurns > 0 && lastRecordedTurn >= targetTurns) {
+        log(`turn target reached (${lastRecordedTurn}/${targetTurns}) — stopping autoplay`);
+        await tryEval(cdp, `try { Autoplay.setActive(false); } catch(e) {}`);
+        await sleep(1500);  // let AutoplayEnded fire and harness write game_over
+        const go = readGameOver(runId);
+        if (go) {
+          log(`game over: reason=${go.reason} globalTurn=${go.globalTurn}`);
+          return { turns: go.globalTurn ?? lastRecordedTurn, reason: go.reason, elapsed: Date.now() - start };
+        }
+        // Harness didn't write game_over (e.g. gameOverWritten already set) — synthesize it.
+        return { turns: lastRecordedTurn, reason: "turn_limit", elapsed: Date.now() - start };
       }
     }
 
-    // 4. Check game_over signal written by the harness mod
-    const gameOver = await readGameOver(cdp);
+    // 4. Check game_over signal written by the harness.
+    const gameOver = readGameOver(runId, lastRecordedTurn < 0);
     if (gameOver) {
       log(`game over: reason=${gameOver.reason} globalTurn=${gameOver.globalTurn}`);
       return {
@@ -357,9 +392,9 @@ async function pollUntilDone(cdp: CDP, targetTurns: number, timeoutMs: number): 
       };
     }
 
-    // 5. Hang detection (no recorder progress for 300s)
-    if (Date.now() - lastProgressAt > 300_000) {
-      log(`WARNING: no recorder progress for 300s — aborting`);
+    // 5. Hang detection — no recorder progress for half the total timeout.
+    if (Date.now() - lastProgressAt > hangMs) {
+      log(`WARNING: no recorder progress for ${Math.round(hangMs / 1000)}s — aborting`);
       return {
         turns:   lastRecordedTurn >= 0 ? lastRecordedTurn : 0,
         reason:  "hang_detected",
@@ -381,7 +416,7 @@ async function pollUntilDone(cdp: CDP, targetTurns: number, timeoutMs: number): 
 
 async function main() {
   const args = parseArgs();
-  log(`civretro driver — turns=${args.turns} players=${args.players} speed=${args.speed} map=${args.mapSize}${args.seed != null ? ` seed=${args.seed}` : ""}`);
+  log(`civretro driver — turns=${args.turns} players=${args.players} speed=${args.speed} map=${args.mapSize} timeout=${Math.round(args.timeoutMs / 1000)}s${args.seed != null ? ` seed=${args.seed}` : ""}`);
 
   log("connecting to Civ 7...");
   let cdp = await connectWithRetry(60_000);
@@ -389,12 +424,27 @@ async function main() {
 
   const inShell = await tryEval<boolean>(cdp, "UI.isInShell()");
   if (!inShell) {
-    log("WARNING: game already running — will attempt to continue from current state");
-  } else {
-    await configureAndLaunch(cdp, args);
     await cdp.close();
-    cdp = await waitForGameReady(120_000);
+    throw new Error("A game is already running. Return to the main menu before launching the driver.");
   }
+
+  const ctx = await configureAndLaunch(cdp, args);
+  const config = ctx.config;
+  const state  = ctx.state;
+  const runId  = config.runId;
+  await cdp.close();
+  cdp = await waitForGameReady(120_000);
+
+  // Re-write config & harness_state from inside the game context.
+  // The shell-context writes go to sqlite, but Coherent Gameface's game-context
+  // in-memory cache can start stale. Re-writing here ensures the harness sees
+  // the correct values regardless of cache behavior.
+  log(`applying harness config in game context (runId=${runId})...`);
+  await setLS(cdp, "civretro:config",        config);
+  await setLS(cdp, "civretro:harness_state", state);
+  await removeLS(cdp, "civretro:game_over");
+  const verifyGO = await tryEval<string>(cdp, `localStorage.getItem('civretro:game_over')`, null);
+  if (verifyGO) log(`  WARNING: game_over still present: ${String(verifyGO).slice(0, 80)}`);
 
   log("activating Autoplay...");
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -404,8 +454,13 @@ async function main() {
     await sleep(1000);
   }
 
+  // Belt-and-suspenders: call notifyUIReady from the driver side so the Begin
+  // Game screen is dismissed even if the harness's whenReady callback already
+  // ran before the driver had a chance to activate Autoplay.
+  await tryEval(cdp, `try { UI.notifyUIReady(); } catch(e) {}`);
+
   log("running game...");
-  const result = await pollUntilDone(cdp, args.turns, 600_000);
+  const result = await pollUntilDone(cdp, runId, args.turns, args.timeoutMs);
 
   log("exiting to main menu...");
   await tryEval(cdp, 'engine.call("exitToMainMenu")');

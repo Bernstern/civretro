@@ -39,6 +39,7 @@ function createHarness(deps) {
     var ls           = deps.localStorage;
 
     var gameOverWritten = false;
+    var autoplayArmed   = false;  // set synchronously in arm(); read in whenReady
 
     // -------------------------------------------------------------------------
     // Persistence helpers
@@ -64,9 +65,11 @@ function createHarness(deps) {
         if (gameOverWritten) return;
         gameOverWritten = true;
         try {
+            var c   = cfg();
             var idx = JSON.parse(ls.getItem('civretro:index') || 'null');
             var hs  = getHarnessState();
             ls.setItem('civretro:game_over', JSON.stringify({
+                runId:      c.runId || null,
                 sessionId:  idx ? idx.sessionId : null,
                 reason:     reason,
                 ageTurn:    Game ? Game.turn : null,
@@ -89,8 +92,10 @@ function createHarness(deps) {
             var c  = cfg();
             var hs = getHarnessState();
 
-            // Detect stale harness_state from a prior game via runId mismatch.
-            if (c.runId && hs.runId && c.runId !== hs.runId) {
+            // Detect stale harness_state: either a runId mismatch or a malformed
+            // state object (e.g. it accidentally holds the config fields).
+            var stateIsValid = typeof hs.turnsPlayed === 'number' && !('turns' in hs);
+            if (!stateIsValid || (c.runId && hs.runId && c.runId !== hs.runId)) {
                 hs = { runId: c.runId, turnsPlayed: 0 };
                 setHarnessState(hs);
             }
@@ -107,6 +112,7 @@ function createHarness(deps) {
             Autoplay.setReturnAsPlayer(c.returnAs  !== undefined ? c.returnAs  : 0);
             Autoplay.setObserveAsPlayer(c.observeAs !== undefined ? c.observeAs : -1);
             Autoplay.setActive(true);
+            autoplayArmed = true;
             Automation.log('civretro-harness: armed target=' + (target || 'unlimited')
                 + ' played=' + played + ' remaining=' + (target > 0 ? target - played : 'unlimited')
                 + ' isActive=' + Autoplay.isActive);
@@ -160,9 +166,11 @@ function createHarness(deps) {
     engine.on('GameAgeEnded', arm);
 
     // LOAD SCREEN: bypass the "Begin Game" button when Autoplay is active.
+    // Use the JS flag rather than Autoplay.isActive — the C++ state may not
+    // reflect setActive(true) synchronously, causing a missed notifyUIReady.
     engine.whenReady.then(function () {
         try {
-            if (Autoplay.isActive) {
+            if (autoplayArmed) {
                 UI.notifyUIReady();
                 Automation.log('civretro-harness: notifyUIReady called');
             }
