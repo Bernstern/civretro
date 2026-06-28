@@ -491,15 +491,13 @@ async function main() {
   const result = await pollUntilDone(cdp, runId, args.turns, args.timeoutMs);
 
   log("exiting to main menu...");
-  await tryEval(cdp, 'engine.call("exitToMainMenu")');
-  // Wait for the shell (main menu) to be active before closing. The exit
-  // command is async — the game needs a few seconds to transition.
-  for (let i = 0; i < 15; i++) {
-    await sleep(1000);
-    const inShell = await tryEval<boolean>(cdp, "UI.isInShell()", false);
-    if (inShell) break;
-  }
+  // exitToMainMenu tears down the game context. The CDP eval may time out or
+  // throw as the context disappears — that's fine, we just need the command
+  // dispatched. Don't poll isInShell afterwards: each poll carries a 10s eval
+  // timeout and 15 polls × 10s = 2.5 min hang while the context is in limbo.
+  try { await cdp.eval('engine.call("exitToMainMenu")', 2000); } catch {}
   await cdp.close();
+  await sleep(3000);
 
   log(`done — turns=${result.turns} reason=${result.reason} elapsed=${Math.round(result.elapsed / 1000)}s`);
 }
