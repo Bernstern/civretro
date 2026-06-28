@@ -339,8 +339,15 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
   const priorSession = readRecorderIndex()?.sessionId ?? null;
 
   let lastProgressAt = Date.now();
-  let lastRecordedTurn = -1;
+  let lastRecordedTurn = -1;       // global turns (accumulated across ages)
   let lastAutoplayState = "";
+
+  // Age-transition accumulator: each age creates a new recorder session and
+  // resets idx.latest back to 1. We sum up completed-age turn counts so that
+  // lastRecordedTurn always reflects true global turns across all ages.
+  let accumulatedTurns = 0;        // sum of turns from all completed ages
+  let activeSession: string | null = null;
+  let activeSessionMax = 0;        // highest idx.latest seen in the current age
 
   while (Date.now() < deadline) {
     await sleep(2000);
@@ -358,10 +365,20 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
     // 3. Read recorder index — source of truth for global turns played.
     const idx = readRecorderIndex();
     if (idx !== null && idx.sessionId !== priorSession) {
-      const currentTurn = idx.latest ?? idx.totalTurns ?? 0;
-      if (currentTurn !== lastRecordedTurn) {
-        log(`recorder: session=${idx.sessionId} turn=${currentTurn}/${targetTurns} (${idx.turns?.length ?? 0} turns recorded)`);
-        lastRecordedTurn = currentTurn;
+      // Detect age transition: session changed → freeze previous age's count.
+      if (activeSession !== null && idx.sessionId !== activeSession) {
+        accumulatedTurns += activeSessionMax;
+        activeSessionMax = 0;
+      }
+      activeSession = idx.sessionId;
+
+      const ageTurn = idx.latest ?? idx.totalTurns ?? 0;
+      if (ageTurn > activeSessionMax) activeSessionMax = ageTurn;
+      const globalTurn = accumulatedTurns + ageTurn;
+
+      if (globalTurn !== lastRecordedTurn) {
+        log(`recorder: session=${idx.sessionId} age_turn=${ageTurn} global=${globalTurn}/${targetTurns}`);
+        lastRecordedTurn = globalTurn;
         lastProgressAt = Date.now();
       }
 
@@ -464,6 +481,13 @@ async function main() {
 
   log("exiting to main menu...");
   await tryEval(cdp, 'engine.call("exitToMainMenu")');
+  // Wait for the shell (main menu) to be active before closing. The exit
+  // command is async — the game needs a few seconds to transition.
+  for (let i = 0; i < 15; i++) {
+    await sleep(1000);
+    const inShell = await tryEval<boolean>(cdp, "UI.isInShell()");
+    if (inShell) break;
+  }
   await cdp.close();
 
   log(`done — turns=${result.turns} reason=${result.reason} elapsed=${Math.round(result.elapsed / 1000)}s`);
