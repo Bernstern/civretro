@@ -1,186 +1,192 @@
-// CivRetro AI Harness — developer-only mod script.
+// CivRetro Autoplay Harness — suppress Begin/Age screens, global turn counter.
 //
-// Suppresses the Begin screen and Age Transition screens so autonomous all-AI
-// games run without human input.
+// Two things block a fully-automated game:
 //
-// HOW IT WORKS:
-//   The game's own notification handlers already have the right guard:
-//     CreateAdvancedStart.activate():  if (!Autoplay.isActive) { ContextManager.push(...) }
-//     CreateAgeTransition.activate():  if (Autoplay.isActive)  { return true; }
-//   If Autoplay is active when those fire, the screens are never pushed at all.
+//   1. Loading curtain "Begin Game" button (load-screen-model.js).
+//      handleGameStart() calls UI.notifyUIReady() — no Autoplay check.
+//      Fix: call UI.notifyUIReady() ourselves in engine.whenReady.
 //
-//   PRIMARY: call activateAutoplay() at eval time (synchronous, before any
-//   notification handler runs — Coherent evals all scripts before dispatching
-//   events). This sets Autoplay.isActive = true before the Begin/Age handlers fire.
+//   2. screen-advanced-start / screen-dedication-selection (notification-handlers.js).
+//      CreateAdvancedStart.activate()  guards on `if (!Autoplay.isActive)`.
+//      CreateAgeTransition.activate()  guards on `if (Autoplay.isActive)`.
+//      Fix: set Autoplay active at eval-time, before any notification fires.
 //
-//   BELT-AND-SUSPENDERS: repeat in PostGameInitialization, GameStarted,
-//   AutoplayEnded, and GameAgeEnded to re-arm after age-transition context
-//   reloads (Coherent Gameface reloads the JS context at each age boundary,
-//   re-running this script from scratch).
+// Global turn counter:
+//   Autoplay.setTurns() is per-age. The recorder also resets its index each age.
+//   Instead, the harness maintains civretro:harness_state.turnsPlayed via the
+//   TurnEnd event, which persists in LocalStorage across age context reloads.
+//   The driver writes harness_state with turnsPlayed=0 before each game launch.
+//   runId in config+harness_state guards against stale state from a prior game.
 //
-// NOTE: ContextManager and NotificationModel are ES module exports in
-//   base-standard, not globals — they cannot be monkey-patched from this scope.
+// Completion signal:
+//   Writes civretro:game_over to localStorage once the target is reached or
+//   Autoplay deactivates, so the external driver can detect it and exit.
 //
-// Always active — no opt-in guard. The mod drives the game whenever it is
-//   installed and enabled in the Mods browser.
+// Testability:
+//   All logic lives in createHarness(deps) — a factory that receives its
+//   dependencies explicitly. In Civ 7 the real game globals are passed in.
+//   In tests, mocks are injected. The guard at the bottom auto-initialises
+//   in game context (typeof module === 'undefined') and exports for Node.js.
 //
-// Configuration (optional — set via CDP before the game starts):
-//   window.__civretro = {
-//     turns:     N,    // 0 or absent = unlimited
-//     observeAs: -1,   // -1 = no camera; 1000 = full-vision observer
-//     returnAs:  0,    // player to return control to when autoplay ends
-//   }
-//
-// Debug logging:
-//   Set localStorage key civretro:debug = '1' to enable Automation.log output.
-//   The launcher injects this via CDP: localStorage.setItem('civretro:debug','1')
-//   Logs are written to the game's Automation log file.
+// Enable in Mods browser for automated runs; disable to return to normal play.
 
-(function () {
-    const TAG = "CIVRETRO:harness";
+function createHarness(deps) {
+    var engine       = deps.engine;
+    var Autoplay     = deps.Autoplay;
+    var UI           = deps.UI;
+    var Game         = deps.Game;
+    var Automation   = deps.Automation;
+    var ls           = deps.localStorage;
+
+    var gameOverWritten = false;
 
     // -------------------------------------------------------------------------
-    // Logger — writes to Automation.log when civretro:debug = '1' in localStorage.
-    // error() is always-on regardless of the flag.
+    // Persistence helpers
     // -------------------------------------------------------------------------
-    var log = (function () {
-        function isEnabled() {
-            try { return localStorage.getItem('civretro:debug') === '1'; } catch (e) { return false; }
-        }
-        return {
-            info:  function (msg) { if (isEnabled()) Automation.log(TAG + ':INFO: ' + msg); },
-            warn:  function (msg) { if (isEnabled()) Automation.log(TAG + ':WARN: ' + msg); },
-            error: function (msg) { Automation.log(TAG + ':ERR: ' + msg); },
-        };
-    })();
 
     function cfg() {
-        try {
-            var stored = localStorage.getItem('civretro:config');
-            if (stored) return JSON.parse(stored);
-        } catch (e) {}
-        return window.__civretro || {};
+        try { return JSON.parse(ls.getItem('civretro:config') || '{}'); } catch (e) { return {}; }
+    }
+
+    function getHarnessState() {
+        try { return JSON.parse(ls.getItem('civretro:harness_state') || '{}'); } catch (e) { return {}; }
+    }
+
+    function setHarnessState(s) {
+        try { ls.setItem('civretro:harness_state', JSON.stringify(s)); } catch (e) {}
     }
 
     // -------------------------------------------------------------------------
-    // Autoplay configuration and activation
+    // Game-over signal — written at most once per age context.
     // -------------------------------------------------------------------------
-    // applyConfig() always re-applies turns/observer even when already active —
-    // CDP may set window.__civretro after the mod first fires, so we must not
-    // guard on Autoplay.isActive when applying config.
-    // activateAutoplay() calls applyConfig then sets active if not already set.
 
-    function applyConfig() {
+    function writeGameOver(reason) {
+        if (gameOverWritten) return;
+        gameOverWritten = true;
         try {
-            const c = cfg();
-            const turns     = (c.turns > 0) ? c.turns : 0;
-            const observeAs = (c.observeAs !== undefined) ? c.observeAs : -1;
-            const returnAs  = (c.returnAs  !== undefined) ? c.returnAs  : 0;
-
-            Configuration.getUser().setLockedValue("QuickMovement", true);
-            Configuration.getUser().setLockedValue("QuickCombat",   true);
-
-            if (turns > 0) Autoplay.setTurns(turns);
-            Autoplay.setReturnAsPlayer(returnAs);
-            Autoplay.setObserveAsPlayer(observeAs);
-
-            log.info('config applied turns=' + turns + ' observeAs=' + observeAs + ' returnAs=' + returnAs + ' isActive=' + Autoplay.isActive);
+            var idx = JSON.parse(ls.getItem('civretro:index') || 'null');
+            var hs  = getHarnessState();
+            ls.setItem('civretro:game_over', JSON.stringify({
+                sessionId:  idx ? idx.sessionId : null,
+                reason:     reason,
+                ageTurn:    Game ? Game.turn : null,
+                globalTurn: hs.turnsPlayed || (idx ? (idx.totalTurns || idx.latest) : null),
+                ts:         Date.now()
+            }));
+            Automation.log('civretro-harness: game_over reason=' + reason + ' globalTurn=' + (hs.turnsPlayed || 0));
         } catch (e) {
-            log.error('applyConfig failed: ' + e.message);
+            Automation.log('civretro-harness: game_over write failed: ' + e.message);
         }
     }
 
-    function isHumanGame() {
-        try {
-            var ids = Players.getAliveMajorIds();
-            for (var i = 0; i < ids.length; i++) {
-                var p = Players.get(ids[i]);
-                if (p && p.isHuman) return true;
-            }
-        } catch (e) {}
-        return false;
-    }
+    // -------------------------------------------------------------------------
+    // Arm Autoplay — called at eval-time and on age transitions.
+    // Does NOT call setTurns(); global turn math lives in onTurnEnd.
+    // -------------------------------------------------------------------------
 
-    function activateAutoplay() {
+    function arm() {
         try {
-            if (isHumanGame()) {
-                log.warn('human player detected — harness is a no-op');
+            var c  = cfg();
+            var hs = getHarnessState();
+
+            // Detect stale harness_state from a prior game via runId mismatch.
+            if (c.runId && hs.runId && c.runId !== hs.runId) {
+                hs = { runId: c.runId, turnsPlayed: 0 };
+                setHarnessState(hs);
+            }
+
+            var target = c.turns > 0 ? c.turns : 0;
+            var played = hs.turnsPlayed || 0;
+
+            if (target > 0 && played >= target) {
+                Automation.log('civretro-harness: global target reached at arm (played=' + played + '), writing game_over');
+                writeGameOver('turn_limit');
                 return;
             }
-            applyConfig();
-            if (!Autoplay.isActive) {
-                Autoplay.setActive(true);
-                log.info('Autoplay.setActive(true)');
-            }
+
+            Autoplay.setReturnAsPlayer(c.returnAs  !== undefined ? c.returnAs  : 0);
+            Autoplay.setObserveAsPlayer(c.observeAs !== undefined ? c.observeAs : -1);
+            Autoplay.setActive(true);
+            Automation.log('civretro-harness: armed target=' + (target || 'unlimited')
+                + ' played=' + played + ' remaining=' + (target > 0 ? target - played : 'unlimited')
+                + ' isActive=' + Autoplay.isActive);
         } catch (e) {
-            log.error('activateAutoplay failed: ' + e.message);
+            // Autoplay not yet available — PostGameInitialization will retry
         }
     }
 
     // -------------------------------------------------------------------------
-    // PRIMARY: activate at eval time, before any notification handler runs.
-    // If Autoplay is not yet available (early load), the catch is a no-op and
-    // the event handlers below will pick it up.
-    // -------------------------------------------------------------------------
-    log.info('eval autoplayDefined=' + (typeof Autoplay !== 'undefined') + ' isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
-    activateAutoplay();
-    log.info('eval-after isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
-
-    // -------------------------------------------------------------------------
-    // BELT-AND-SUSPENDERS: re-arm on engine events.
-    // PostGameInitialization and GameStarted catch the case where Autoplay was
-    // not available at eval time. GameAgeEnded pre-arms before the next age's
-    // context reload. AutoplayEnded re-arms if Autoplay self-terminates.
+    // Turn counter — increment turnsPlayed each global turn, stop at target.
+    // TurnEnd fires once per round in Civ 7 (not per player).
     // -------------------------------------------------------------------------
 
-    engine.on("PostGameInitialization", function () {
-        log.info('PostGameInitialization isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
-        activateAutoplay();
-    });
+    engine.on('TurnEnd', function () {
+        var c = cfg();
+        var target = c.turns > 0 ? c.turns : 0;
+        if (target === 0) return;
 
-    engine.on("GameStarted", function () {
-        log.info('GameStarted isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
-        activateAutoplay();
-    });
+        var hs = getHarnessState();
+        hs.turnsPlayed = (hs.turnsPlayed || 0) + 1;
+        setHarnessState(hs);
 
-    engine.on("AutoplayEnded", function () {
-        log.info('AutoplayEnded — re-arming');
-        activateAutoplay();
-    });
-
-    engine.on("GameAgeEnded", function () {
-        log.info('GameAgeEnded — pre-arming for next age');
-        activateAutoplay();
-    });
-
-    // MP auto-EndTurn: in LAN/MP games Autoplay may not fully control the local
-    // slot. Re-apply observer config (-1) each turn and submit End Turn so the
-    // local slot never stalls waiting for human input.
-    engine.on("LocalPlayerTurnBegin", function () {
-        try {
-            var isMP = typeof Network !== "undefined"
-                       && typeof Network.getServerType === "function"
-                       && Network.getServerType() !== 0;
-            if (isMP) {
-                applyConfig();
-                setTimeout(function () {
-                    try {
-                        GameContext.sendTurnComplete();
-                        log.info('MP auto-EndTurn submitted');
-                    } catch (e) {
-                        log.error('sendTurnComplete failed: ' + e.message);
-                    }
-                }, 300);
-            }
-        } catch (e) {
-            log.error('LocalPlayerTurnBegin handler error: ' + e.message);
+        if (hs.turnsPlayed >= target) {
+            try { Autoplay.setActive(false); } catch (e) {}
+            writeGameOver('turn_limit');
         }
     });
 
-    engine.whenReady.then(function () {
-        log.info('whenReady isActive=' + (typeof Autoplay !== 'undefined' ? Autoplay.isActive : 'n/a'));
-        activateAutoplay();
+    // -------------------------------------------------------------------------
+    // Autoplay deactivation backup — fires frequently (once per AI action).
+    // Guard: only act when Autoplay is truly inactive.
+    // -------------------------------------------------------------------------
+
+    engine.on('AutoplayEnded', function () {
+        if (Autoplay.isActive) return;
+        writeGameOver('autoplay_ended');
     });
 
-    log.info('loaded');
-})();
+    // -------------------------------------------------------------------------
+    // Event hooks
+    // -------------------------------------------------------------------------
+
+    // PRIMARY: set Autoplay active before CreateAdvancedStart.activate() fires.
+    arm();
+
+    // FALLBACK: if Autoplay wasn't available at eval time.
+    engine.on('PostGameInitialization', arm);
+
+    // RE-ARM: each age reloads the JS context; eval-time arm() above handles it,
+    // but also hook GameAgeEnded as belt-and-suspenders.
+    engine.on('GameAgeEnded', arm);
+
+    // LOAD SCREEN: bypass the "Begin Game" button when Autoplay is active.
+    engine.whenReady.then(function () {
+        try {
+            if (Autoplay.isActive) {
+                UI.notifyUIReady();
+                Automation.log('civretro-harness: notifyUIReady called');
+            }
+        } catch (e) {
+            Automation.log('civretro-harness: notifyUIReady failed: ' + e.message);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Context dispatch
+// ---------------------------------------------------------------------------
+// In Civ 7 (no CommonJS): auto-initialize with real game globals.
+// In Node.js (required via createRequire): export createHarness for tests.
+
+if (typeof module === 'undefined') {
+    createHarness({
+        engine:       engine,
+        Autoplay:     Autoplay,
+        UI:           UI,
+        Game:         Game,
+        Automation:   Automation,
+        localStorage: localStorage
+    });
+} else {
+    module.exports = { createHarness: createHarness };
+}
