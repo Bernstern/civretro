@@ -38,12 +38,20 @@ def main():
     p.add_argument("--turns",    action="store_true", help="List all captured turns")
     p.add_argument("--players",  action="store_true", help="Show player summaries for all captured turns")
     p.add_argument("--all",      action="store_true", help="Show all civretro keys")
-    p.add_argument("--raw",      action="store_true", help="Print raw JSON")
+    p.add_argument("--raw",          action="store_true", help="Print raw JSON")
+    p.add_argument("--clear-harness", action="store_true", help="Remove harness keys (civretro:config, civretro:game_over, civretro:debug)")
     args = p.parse_args()
 
     if not DB_PATH.exists():
         print(f"ERROR: SQLite not found at {DB_PATH}", file=sys.stderr)
         sys.exit(1)
+
+    if args.clear_harness:
+        with sqlite3.connect(DB_PATH) as conn:
+            for key in ("civretro:config", "civretro:game_over", "civretro:debug"):
+                conn.execute('DELETE FROM "Values" WHERE id=? AND key=?', (ORIGIN, key))
+        print("Cleared harness keys: civretro:config, civretro:game_over, civretro:debug")
+        return
 
     if not any([args.session, args.index, args.turn is not None, args.turns, args.players, args.all]):
         args.all = True  # default

@@ -268,6 +268,11 @@ async def wait_for_game_ready(max_wait: int = 180, n_turns: int = 0) -> CDPClien
     except Exception as e:
         log.warning("harness inject failed on first connect (%s) — will retry in loop", type(e).__name__)
 
+    # Primary activation: go straight to CDP rather than waiting for mod.
+    # The mod will also attempt at eval time; whichever succeeds first wins.
+    log.info("activating Autoplay via CDP (primary path)...")
+    await activate_autoplay_cdp(c, n_turns, label="primary")
+
     for i in range(max_wait):
         await asyncio.sleep(1)
         try:
@@ -297,18 +302,53 @@ async def wait_for_game_ready(max_wait: int = 180, n_turns: int = 0) -> CDPClien
     return None
 
 
-async def _check_harness(c: CDPClient, timeout: int = 15) -> bool:
-    """Poll Autoplay.isActive for up to timeout seconds; warn if harness hasn't activated it."""
+async def _check_harness(c: CDPClient, n_turns: int, timeout: int = 3) -> bool:
+    """
+    Check if the harness mod activated Autoplay. If not active within timeout,
+    fall back to CDP activation immediately — don't wait.
+    """
     for i in range(timeout):
         await asyncio.sleep(1)
         active = await safe_eval(c, "typeof Autoplay !== 'undefined' && Autoplay.isActive", timeout=5)
-        if active is True or active == "true" or active == True:
-            log.info("harness confirmed active (Autoplay.isActive=true) after %ds", i + 1)
+        if active is True:
+            log.info("harness mod activated Autoplay within %ds", i + 1)
             return True
-        if i == 4:
-            log.warning("Autoplay not yet active after 5s — are both mods enabled in the Mods menu?")
-    log.error("harness not active after %ds — civretro-harness mod may not be enabled", timeout)
-    return False
+        if i == 0:
+            log.info("waiting for harness mod to activate Autoplay...")
+
+    log.warning("harness mod did not activate within %ds — activating via CDP", timeout)
+    return await activate_autoplay_cdp(c, n_turns, label="cdp-fallback")
+
+
+async def activate_autoplay_cdp(c: CDPClient, n_turns: int, label: str = "launcher") -> bool:
+    """Activate Autoplay and apply config via CDP. Returns True if Autoplay.isActive after."""
+    js = (
+        "(function() {"
+        "  try {"
+        "    if (typeof Autoplay === 'undefined') return 'unavailable';"
+        f"    if ({n_turns} > 0) Autoplay.setTurns({n_turns});"
+        "    Autoplay.setReturnAsPlayer(0);"
+        "    Autoplay.setObserveAsPlayer(-1);"
+        "    var wasActive = Autoplay.isActive;"
+        "    if (!wasActive) Autoplay.setActive(true);"
+        "    return (wasActive ? 'already-active' : 'activated') + ':' + Autoplay.isActive;"
+        "  } catch(e) { return 'err:' + e.message; }"
+        "})()"
+    )
+    result = await safe_eval(c, js, timeout=5)
+    result_str = str(result) if result else "none"
+    if result_str.startswith("already-active"):
+        log.info("[%s] Autoplay already active (mod beat launcher)", label)
+        return True
+    elif result_str.startswith("activated"):
+        log.info("[%s] Autoplay activated via CDP (turns=%d)", label, n_turns)
+        return True
+    elif result_str == "unavailable":
+        log.warning("[%s] Autoplay not yet available — game still loading", label)
+        return False
+    else:
+        log.warning("[%s] activate_autoplay_cdp returned: %s", label, result_str)
+        return False
 
 
 _HANG_WARN_S  = 120   # warn if no new turns for this many seconds
@@ -471,14 +511,19 @@ async def _run(cfg: RunConfig):
     except Exception:
         pass
 
-    # Write config and new-session flag to localStorage (fs://game origin persists into game context)
+    # Write config to localStorage. runId is embedded in civretro:index every turn
+    # (reliable flush) — the recorder uses it to resume the correct session across age transitions.
+    # Do NOT set civretro:forceNewSession: it persists to SQLite and re-triggers in the new-age
+    # context even after the Antiquity removeItem() call (Coherent in-memory vs SQLite mismatch).
+    import random, string
+    run_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
     config_js = (
-        f"localStorage.setItem('civretro:config', JSON.stringify({{turns:{cfg.n_turns},observeAs:-1,returnAs:0}}));"
-        f"localStorage.setItem('civretro:forceNewSession','1')"
+        f"localStorage.setItem('civretro:config', JSON.stringify({{turns:{cfg.n_turns},observeAs:-1,returnAs:0,runId:'{run_id}'}}));"
+        f"localStorage.setItem('civretro:debug','1')"
     )
     try:
         await safe_eval(c, config_js, timeout=5)
-        log.info("civretro config written to localStorage (turns=%d)", cfg.n_turns)
+        log.info("civretro config written to localStorage (turns=%d runId=%s)", cfg.n_turns, run_id)
     except Exception as e:
         log.warning("localStorage config write failed: %s", e)
 
@@ -502,7 +547,7 @@ async def _run(cfg: RunConfig):
         log.error("game never became ready")
         raise RunError("game never became ready")
 
-    await _check_harness(c)
+    await _check_harness(c, cfg.n_turns)
     # (don't raise on failure — proceed anyway, warn is enough)
 
     # Harness handles Autoplay activation and Begin screen suppression.

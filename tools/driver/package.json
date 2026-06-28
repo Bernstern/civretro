@@ -6,6 +6,7 @@
   "scripts": {
     "drive": "tsx src/drive.ts",
     "exit": "tsx src/exit.ts",
+    "wipe": "tsx src/wipe.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
