@@ -65,11 +65,13 @@ async function connectWithRetry(maxMs: number): Promise<CDP> {
   );
 }
 
-async function tryEval<T>(cdp: CDP, js: string, fallback?: T): Promise<T> {
+// fallback is required — callers must be explicit about what they want on failure.
+// Use cdp.eval() directly when a failure should propagate as an error.
+async function tryEval<T>(cdp: CDP, js: string, fallback: T): Promise<T> {
   try {
     return await cdp.eval<T>(js);
   } catch {
-    return fallback as T;
+    return fallback;
   }
 }
 
@@ -153,6 +155,11 @@ async function configureAndLaunch(cdp: CDP, args: ReturnType<typeof parseArgs>):
     standard: "MAPSIZE_STANDARD", large: "MAPSIZE_LARGE",
   };
 
+  const speed = speedMap[args.speed];
+  if (!speed) throw new Error(`Unknown --speed "${args.speed}". Valid: ${Object.keys(speedMap).join(", ")}`);
+  const mapSize = sizeMap[args.mapSize];
+  if (!mapSize) throw new Error(`Unknown --map-size "${args.mapSize}". Valid: ${Object.keys(sizeMap).join(", ")}`);
+
   await cdp.eval("Configuration.editGame().reset()");
   await sleep(500);
 
@@ -161,12 +168,8 @@ async function configureAndLaunch(cdp: CDP, args: ReturnType<typeof parseArgs>):
       `Configuration.editMap().setMapSeed(${args.seed}); Configuration.editGame().setGameSeed(${args.seed});`
     );
   }
-  await cdp.eval(
-    `Configuration.editGame().setGameSpeedType("${speedMap[args.speed] ?? "GAMESPEED_ONLINE"}")`
-  );
-  await cdp.eval(
-    `Configuration.editMap().setMapSize("${sizeMap[args.mapSize] ?? "MAPSIZE_TINY"}")`
-  );
+  await cdp.eval(`Configuration.editGame().setGameSpeedType("${speed}")`);
+  await cdp.eval(`Configuration.editMap().setMapSize("${mapSize}")`);
 
   const playerSetup = `(function() {
     var ids = Configuration.getGame().inUsePlayerIDs;
@@ -180,8 +183,7 @@ async function configureAndLaunch(cdp: CDP, args: ReturnType<typeof parseArgs>):
     }
     return 'configured ' + ${args.players} + ' AI players';
   })()`;
-  const setupResult = await cdp.eval<string>(playerSetup);
-  log(setupResult ?? "players configured");
+  log(await cdp.eval<string>(playerSetup));
 
   log("launching game...");
   await cdp.eval("Network.hostGame(ServerType.SERVER_TYPE_NONE)");
@@ -202,7 +204,8 @@ async function waitForGameReady(maxMs: number): Promise<CDP> {
       await cdp.connect();
       const ready = await tryEval<boolean>(
         cdp,
-        `typeof Game !== 'undefined' && typeof Game.turn !== 'undefined'`
+        `typeof Game !== 'undefined' && typeof Game.turn !== 'undefined'`,
+        false
       );
       if (ready) {
         log("game ready");
@@ -221,7 +224,7 @@ async function waitForGameReady(maxMs: number): Promise<CDP> {
 // ---------------------------------------------------------------------------
 
 async function activateAutoplay(cdp: CDP): Promise<string> {
-  const result = await tryEval<string>(cdp, `
+  return tryEval<string>(cdp, `
     (function() {
       try {
         if (typeof Autoplay === 'undefined') return 'unavailable';
@@ -235,7 +238,6 @@ async function activateAutoplay(cdp: CDP): Promise<string> {
       } catch(e) { return 'err:' + e.message; }
     })()
   `, "unavailable");
-  return result ?? "unavailable";
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +273,7 @@ async function dismissNotifications(cdp: CDP): Promise<number> {
   `, "[]");
 
   const notifications: Array<{ nid: number; type: string; summary: string; dismissed: boolean }> =
-    JSON.parse(raw ?? "[]");
+    JSON.parse(raw);
 
   let dismissed = 0;
   for (const n of notifications) {
@@ -298,7 +300,14 @@ interface RecorderIndex {
 }
 
 function readRecorderIndex(): RecorderIndex | null {
-  return readLSJson<RecorderIndex>("civretro:index");
+  const v = readLSJson<RecorderIndex>("civretro:index");
+  if (
+    !v ||
+    typeof v.sessionId   !== "string" ||
+    typeof v.latest      !== "number" ||
+    typeof v.totalTurns  !== "number"
+  ) return null;
+  return v;
 }
 
 function readGameOver(runId: string, debug = false): GameOverSignal | null {
@@ -372,7 +381,7 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
       }
       activeSession = idx.sessionId;
 
-      const ageTurn = idx.latest ?? idx.totalTurns ?? 0;
+      const ageTurn = idx.latest;
       if (ageTurn > activeSessionMax) activeSessionMax = ageTurn;
       const globalTurn = accumulatedTurns + ageTurn;
 
@@ -390,7 +399,8 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
         await sleep(1500);  // let AutoplayEnded fire and harness write game_over
         const go = readGameOver(runId);
         if (go) {
-          log(`game over: reason=${go.reason} globalTurn=${go.globalTurn}`);
+          if (go.globalTurn == null) log(`WARNING: game_over has no globalTurn — using recorder count ${lastRecordedTurn}`);
+          log(`game over: reason=${go.reason} globalTurn=${go.globalTurn ?? lastRecordedTurn}`);
           return { turns: go.globalTurn ?? lastRecordedTurn, reason: go.reason, elapsed: Date.now() - start };
         }
         // Harness didn't write game_over (e.g. gameOverWritten already set) — synthesize it.
@@ -401,7 +411,8 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
     // 4. Check game_over signal written by the harness.
     const gameOver = readGameOver(runId, lastRecordedTurn < 0);
     if (gameOver) {
-      log(`game over: reason=${gameOver.reason} globalTurn=${gameOver.globalTurn}`);
+      if (gameOver.globalTurn == null) log(`WARNING: game_over has no globalTurn — using recorder count ${lastRecordedTurn}`);
+      log(`game over: reason=${gameOver.reason} globalTurn=${gameOver.globalTurn ?? lastRecordedTurn}`);
       return {
         turns:   gameOver.globalTurn ?? lastRecordedTurn,
         reason:  gameOver.reason,
@@ -439,7 +450,7 @@ async function main() {
   let cdp = await connectWithRetry(60_000);
   log("connected");
 
-  const inShell = await tryEval<boolean>(cdp, "UI.isInShell()");
+  const inShell = await cdp.eval<boolean>("UI.isInShell()");
   if (!inShell) {
     await cdp.close();
     throw new Error("A game is already running. Return to the main menu before launching the driver.");
@@ -460,8 +471,8 @@ async function main() {
   await setLS(cdp, "civretro:config",        config);
   await setLS(cdp, "civretro:harness_state", state);
   await removeLS(cdp, "civretro:game_over");
-  const verifyGO = await tryEval<string>(cdp, `localStorage.getItem('civretro:game_over')`, null);
-  if (verifyGO) log(`  WARNING: game_over still present: ${String(verifyGO).slice(0, 80)}`);
+  const verifyGO = await tryEval<string | null>(cdp, `localStorage.getItem('civretro:game_over')`, null);
+  if (verifyGO) log(`  WARNING: game_over still present: ${verifyGO.slice(0, 80)}`);
 
   log("activating Autoplay...");
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -485,7 +496,7 @@ async function main() {
   // command is async — the game needs a few seconds to transition.
   for (let i = 0; i < 15; i++) {
     await sleep(1000);
-    const inShell = await tryEval<boolean>(cdp, "UI.isInShell()");
+    const inShell = await tryEval<boolean>(cdp, "UI.isInShell()", false);
     if (inShell) break;
   }
   await cdp.close();

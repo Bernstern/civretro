@@ -219,7 +219,7 @@ describe("PostGameInitialization fallback", () => {
     expect(gameOver(deps)).toBeNull();
   });
 
-  it("S2+PGI/arm_game_over → S5: detects limit met at PGI time", () => {
+  it("S2+PGI/arm_game_over → S5: detects limit met at eval-time arm (not PGI)", () => {
     const Autoplay = makeAutoplay();
     Autoplay.setActive.mockImplementation(() => { throw new Error("not ready"); });
     const deps = makeDeps({ Autoplay }, {
@@ -267,6 +267,22 @@ describe("engine.whenReady — begin screen bypass", () => {
     deps.engine.resolveReady();
     await expect(deps.engine.whenReady).resolves.toBeUndefined();
     expect(deps.Automation.log).toHaveBeenCalledWith(expect.stringContaining("notifyUIReady failed"));
+  });
+
+  it("autoplayArmed flag, not Autoplay.isActive, gates notifyUIReady", async () => {
+    // setActive(true) is called (arm succeeds → autoplayArmed = true), but
+    // Autoplay.isActive stays false — simulating C++ state lag. notifyUIReady
+    // must still be called because the flag is checked, not isActive.
+    const Autoplay = makeAutoplay();
+    Object.defineProperty(Autoplay, "isActive", { get: () => false });
+    const deps = makeDeps({ Autoplay }, { "civretro:config": config(10) });
+    createHarness(deps);
+
+    expect(Autoplay.setActive).toHaveBeenCalledWith(true);  // arm succeeded
+    deps.engine.resolveReady();
+    await deps.engine.whenReady;
+
+    expect(deps.UI.notifyUIReady).toHaveBeenCalledOnce();
   });
 });
 
@@ -491,6 +507,34 @@ describe("runId stale state detection", () => {
     expect(stored.turnsPlayed).toBe(0);
     expect(stored.runId).toBe("new-run");
   });
+
+  it("stateIsValid — non-numeric turnsPlayed: state reset, Autoplay still armed", () => {
+    // Simulates a harness_state where turnsPlayed is a string (schema drift or bug).
+    const deps = makeDeps({}, {
+      "civretro:config":        config(10, { runId: "run1" }),
+      "civretro:harness_state": JSON.stringify({ runId: "run1", turnsPlayed: "5" }),
+    });
+    createHarness(deps);
+
+    const stored = JSON.parse(deps.localStorage.store["civretro:harness_state"]);
+    expect(stored.turnsPlayed).toBe(0);
+    expect(deps.Autoplay.setActive).toHaveBeenCalledWith(true);
+  });
+
+  it("stateIsValid — config fields contaminating state: state reset, Autoplay still armed", () => {
+    // Simulates the production bug where civretro:config blob was written to
+    // civretro:harness_state — state contains 'turns' and other config keys.
+    const deps = makeDeps({}, {
+      "civretro:config":        config(10, { runId: "run1" }),
+      "civretro:harness_state": JSON.stringify({ runId: "run1", turnsPlayed: 3, turns: 10, observeAs: -1 }),
+    });
+    createHarness(deps);
+
+    const stored = JSON.parse(deps.localStorage.store["civretro:harness_state"]);
+    expect(stored.turnsPlayed).toBe(0);
+    expect("turns" in stored).toBe(false);
+    expect(deps.Autoplay.setActive).toHaveBeenCalledWith(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -498,9 +542,9 @@ describe("runId stale state detection", () => {
 // ---------------------------------------------------------------------------
 
 describe("game_over payload", () => {
-  it("contains reason, globalTurn, ageTurn, ts", () => {
+  it("contains reason, globalTurn, ageTurn, ts, and runId", () => {
     const deps = makeDeps({ Game: { turn: 7 } }, {
-      "civretro:config":        config(1),
+      "civretro:config":        config(1, { runId: "run-xyz" }),
       "civretro:harness_state": harnessState(0),
     });
     createHarness(deps);
@@ -511,8 +555,20 @@ describe("game_over payload", () => {
       reason:     "turn_limit",
       ageTurn:    7,
       globalTurn: 1,
+      runId:      "run-xyz",
     });
     expect(typeof go.ts).toBe("number");
+  });
+
+  it("runId is null when config has no runId", () => {
+    const deps = makeDeps({ Game: { turn: 1 } }, {
+      // Explicitly omit runId from config to test the null branch.
+      "civretro:config": JSON.stringify({ turns: 1, observeAs: -1, returnAs: 0 }),
+    });
+    createHarness(deps);
+    deps.engine.trigger("TurnEnd");
+
+    expect(gameOver(deps).runId).toBeNull();
   });
 });
 
