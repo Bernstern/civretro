@@ -26,16 +26,20 @@
     var sessionId = null;
     var globalTurn = 0;
     var currentAge = null;  // tracks age transitions in updateIndex
+    var configRunId = null; // runId from civretro:config; module-level so updateIndex can embed it
 
     // -------------------------------------------------------------------------
     // initSession — run once at IIFE evaluation time.
-    // Detects age transition (recent index ts) vs new game (stale / missing).
+    // Detects age transition vs new game by comparing civretro:config.runId
+    // against idx.runId embedded in civretro:index.
+    //
+    // civretro:index is flushed to SQLite reliably each turn, so idx.runId is
+    // available to the next age's context. civretro:session is written only at
+    // game-start and may not have flushed before the age transition fires.
     // -------------------------------------------------------------------------
 
     (function initSession() {
         // Read the runId written by the driver before this game launch.
-        // This is the authoritative signal for new game vs age transition.
-        var configRunId = null;
         try {
             var cfgRaw = localStorage.getItem("civretro:config");
             if (cfgRaw) { var cfg = JSON.parse(cfgRaw); configRunId = cfg.runId || null; }
@@ -43,14 +47,11 @@
 
         try {
             var idxRaw = localStorage.getItem("civretro:index");
-            var sesRaw = localStorage.getItem("civretro:session");
-            if (idxRaw && sesRaw) {
+            if (idxRaw) {
                 var idx = JSON.parse(idxRaw);
-                var ses = JSON.parse(sesRaw);
-                var sessionRunId = ses.runId || null;
-                // Resume if: same runId (same driver launch = same game) and
-                // either the age just changed or a recent flush exists.
-                var sameRun = configRunId && sessionRunId && configRunId === sessionRunId;
+                // idx.runId is written by updateIndex every turn, so it's reliably
+                // flushed to SQLite by the time the next age's context boots.
+                var sameRun = configRunId && idx.runId && configRunId === idx.runId;
                 if (sameRun && idx.sessionId && idx.totalTurns > 0) {
                     var ageChanged = (typeof Game !== "undefined") && idx.lastAge !== undefined && idx.lastAge !== Game.age;
                     var ageMs = Date.now() - (idx.lastTs || 0);
@@ -276,6 +277,7 @@
             idx.latest = globalTurn;
             idx.lastTs = Date.now();
             idx.lastAge = (snap && snap.age !== undefined) ? snap.age : Game.age;
+            if (configRunId) idx.runId = configRunId;
 
             // Detect age transitions; snap.age or Game.age indicates the current age
             var snapAge = (snap && snap.age !== undefined) ? snap.age : Game.age;
