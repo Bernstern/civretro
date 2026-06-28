@@ -328,10 +328,27 @@ function readGameOver(runId: string, debug = false): GameOverSignal | null {
 // Main poll loop
 // ---------------------------------------------------------------------------
 
+function finalizeHistory(
+  history: SessionEntry[],
+  activeSession: string | null,
+  sessionStartGlobal: number,
+  finalTurns: number,
+): SessionEntry[] {
+  if (activeSession === null) return history;
+  return [...history, { sessionId: activeSession, globalStart: sessionStartGlobal, globalEnd: finalTurns }];
+}
+
+interface SessionEntry {
+  sessionId:   string;
+  globalStart: number;
+  globalEnd:   number;
+}
+
 interface PollResult {
-  turns:   number;
-  reason:  string;
-  elapsed: number;
+  turns:    number;
+  reason:   string;
+  elapsed:  number;
+  sessions: SessionEntry[];
 }
 
 async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeoutMs: number): Promise<PollResult> {
@@ -356,6 +373,8 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
   let accumulatedTurns = 0;        // sum of turns from all completed ages
   let activeSession: string | null = null;
   let activeSessionMax = 0;        // highest idx.latest seen in the current age
+  let sessionStartGlobal = 1;      // globalTurn when current session began
+  const sessionHistory: SessionEntry[] = [];
 
   while (Date.now() < deadline) {
     await sleep(2000);
@@ -373,8 +392,11 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
     // 3. Read recorder index — source of truth for global turns played.
     const idx = readRecorderIndex();
     if (idx !== null && idx.sessionId !== priorSession) {
-      // Detect age transition: session changed → freeze previous age's count.
+      // Detect age transition: session changed → finalize previous age.
       if (activeSession !== null && idx.sessionId !== activeSession) {
+        const prevEnd = accumulatedTurns + activeSessionMax;
+        sessionHistory.push({ sessionId: activeSession, globalStart: sessionStartGlobal, globalEnd: prevEnd });
+        sessionStartGlobal = prevEnd + 1;
         accumulatedTurns += activeSessionMax;
         activeSessionMax = 0;
       }
@@ -397,43 +419,46 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
         await tryEval(cdp, `try { Autoplay.setActive(false); } catch(e) {}`);
         await sleep(1500);  // let AutoplayEnded fire and harness write game_over
         const go = readGameOver(runId);
+        const finalTurns = go?.globalTurn ?? lastRecordedTurn;
+        const finalSessions = finalizeHistory(sessionHistory, activeSession, sessionStartGlobal, finalTurns);
         if (go) {
           if (go.globalTurn == null) log(`WARNING: game_over has no globalTurn — using recorder count ${lastRecordedTurn}`);
-          log(`game over: reason=${go.reason} globalTurn=${go.globalTurn ?? lastRecordedTurn}`);
-          return { turns: go.globalTurn ?? lastRecordedTurn, reason: go.reason, elapsed: Date.now() - start };
+          log(`game over: reason=${go.reason} globalTurn=${finalTurns}`);
+          return { turns: finalTurns, reason: go.reason, elapsed: Date.now() - start, sessions: finalSessions };
         }
-        // Harness didn't write game_over (e.g. gameOverWritten already set) — synthesize it.
-        return { turns: lastRecordedTurn, reason: "turn_limit", elapsed: Date.now() - start };
+        return { turns: finalTurns, reason: "turn_limit", elapsed: Date.now() - start, sessions: finalSessions };
       }
     }
 
     // 4. Check game_over signal written by the harness.
     const gameOver = readGameOver(runId, lastRecordedTurn < 0);
     if (gameOver) {
+      const finalTurns = gameOver.globalTurn ?? lastRecordedTurn;
+      const finalSessions = finalizeHistory(sessionHistory, activeSession, sessionStartGlobal, finalTurns);
       if (gameOver.globalTurn == null) log(`WARNING: game_over has no globalTurn — using recorder count ${lastRecordedTurn}`);
-      log(`game over: reason=${gameOver.reason} globalTurn=${gameOver.globalTurn ?? lastRecordedTurn}`);
-      return {
-        turns:   gameOver.globalTurn ?? lastRecordedTurn,
-        reason:  gameOver.reason,
-        elapsed: Date.now() - start,
-      };
+      log(`game over: reason=${gameOver.reason} globalTurn=${finalTurns}`);
+      return { turns: finalTurns, reason: gameOver.reason, elapsed: Date.now() - start, sessions: finalSessions };
     }
 
     // 5. Hang detection — no recorder progress for half the total timeout.
     if (Date.now() - lastProgressAt > hangMs) {
       log(`WARNING: no recorder progress for ${Math.round(hangMs / 1000)}s — aborting`);
+      const finalTurns = lastRecordedTurn >= 0 ? lastRecordedTurn : 0;
       return {
-        turns:   lastRecordedTurn >= 0 ? lastRecordedTurn : 0,
-        reason:  "hang_detected",
-        elapsed: Date.now() - start,
+        turns:    finalTurns,
+        reason:   "hang_detected",
+        elapsed:  Date.now() - start,
+        sessions: finalizeHistory(sessionHistory, activeSession, sessionStartGlobal, finalTurns),
       };
     }
   }
 
+  const finalTurns = lastRecordedTurn >= 0 ? lastRecordedTurn : 0;
   return {
-    turns:   lastRecordedTurn >= 0 ? lastRecordedTurn : 0,
-    reason:  "timeout",
-    elapsed: Date.now() - start,
+    turns:    finalTurns,
+    reason:   "timeout",
+    elapsed:  Date.now() - start,
+    sessions: finalizeHistory(sessionHistory, activeSession, sessionStartGlobal, finalTurns),
   };
 }
 
@@ -488,6 +513,14 @@ async function main() {
 
   log("running game...");
   const result = await pollUntilDone(cdp, runId, args.turns, args.timeoutMs);
+
+  // Write game manifest: ordered list of sessions with global turn ranges.
+  // Viewers use this to stitch ages together into a complete replay.
+  if (result.sessions.length > 0) {
+    const manifest = { runId, totalTurns: result.turns, sessions: result.sessions };
+    try { await setLS(cdp, `civretro:run:${runId}:manifest`, JSON.stringify(manifest)); } catch {}
+    log(`manifest: ${result.sessions.length} session(s) → ${result.sessions.map(s => `${s.sessionId}[${s.globalStart}-${s.globalEnd}]`).join(", ")}`);
+  }
 
   log("exiting to main menu...");
   // Use the default 10s timeout (same as exit.ts standalone tool). The 2s
