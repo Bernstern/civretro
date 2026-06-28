@@ -142,8 +142,7 @@ async function configureAndLaunch(cdp: CDP, args: ReturnType<typeof parseArgs>):
   await setLS(cdp, "civretro:config",        config);
   await setLS(cdp, "civretro:harness_state", state);
   await removeLS(cdp, "civretro:game_over");
-  await setLS(cdp, "civretro:forceNewSession", "1");
-  await setLS(cdp, "civretro:debug",           "1");
+  await setLS(cdp, "civretro:debug", "1");
   log(`localStorage written (runId=${runId})`);
 
   const speedMap: Record<string, string> = {
@@ -295,8 +294,8 @@ async function dismissNotifications(cdp: CDP): Promise<number> {
 interface RecorderIndex {
   sessionId:  string;
   turns:      number[];
-  latest:     number;
-  totalTurns: number;
+  latest:     number;   // globalTurn of last recorded turn (continuous across ages)
+  totalTurns: number;   // same as latest; kept for compat
 }
 
 function readRecorderIndex(): RecorderIndex | null {
@@ -386,7 +385,7 @@ async function pollUntilDone(cdp: CDP, runId: string, targetTurns: number, timeo
       const globalTurn = accumulatedTurns + ageTurn;
 
       if (globalTurn !== lastRecordedTurn) {
-        log(`recorder: session=${idx.sessionId} age_turn=${ageTurn} global=${globalTurn}/${targetTurns}`);
+        log(`recorder: session=${idx.sessionId} turn=${globalTurn}/${targetTurns}`);
         lastRecordedTurn = globalTurn;
         lastProgressAt = Date.now();
       }

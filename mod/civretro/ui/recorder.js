@@ -2,18 +2,24 @@
 //
 // Session model:
 //   One sessionId per game. Age transitions reload the UI context (Coherent
-//   Gameface), which re-runs this script. We detect age transitions by comparing
-//   Game.age against the age stored in the index (definitive signal), with a
-//   20-minute fallback window for same-age reloads (save/load, UI reload).
+//   Gameface), which re-runs this script. We detect age transitions vs new
+//   games by comparing civretro:config.runId (written by the driver before
+//   each launch) against the runId stored in civretro:session. Same runId →
+//   age transition, resume. Different runId (or missing session) → new game.
+//
+//   This replaces the previous civretro:forceNewSession flag, which was
+//   unreliable: removeItem() only clears the in-memory cache; the SQLite
+//   value survived into the next age context, causing a false new-session.
 //
 // Turn keys use a globalTurn counter (total TurnEnd events this game, starting
 // at 1) instead of Game.turn, so turn numbers stay unique across age resets.
+// Keys are namespaced by sessionId so N games can coexist in the same sqlite.
 //
 // localStorage keys (origin: fs://game, table: LocalStorage.sqlite):
-//   civretro:session     — session metadata (id, isMP, etc.) — written once at game start
-//   civretro:index       — { sessionId, turns[], totalTurns, latest, lastTs, ages[] }
-//   civretro:t:{N}       — full omniscient snapshot for global turn N
-//   civretro:map:{age}   — terrain/resource/feature tile snapshot for each age
+//   civretro:session           — session metadata (id, runId, isMP, etc.)
+//   civretro:index             — { sessionId, turns[], totalTurns, latest, lastTs, ages[] }
+//   civretro:{sessionId}:t:{N} — full omniscient snapshot for global turn N
+//   civretro:map:{age}         — terrain/resource/feature tile snapshot for each age
 
 (function () {
 
@@ -27,25 +33,30 @@
     // -------------------------------------------------------------------------
 
     (function initSession() {
-        var forceNew = false;
+        // Read the runId written by the driver before this game launch.
+        // This is the authoritative signal for new game vs age transition.
+        var configRunId = null;
         try {
-            forceNew = localStorage.getItem('civretro:forceNewSession') === '1';
-            if (forceNew) localStorage.removeItem('civretro:forceNewSession');
+            var cfgRaw = localStorage.getItem("civretro:config");
+            if (cfgRaw) { var cfg = JSON.parse(cfgRaw); configRunId = cfg.runId || null; }
         } catch (e) {}
 
         try {
             var idxRaw = localStorage.getItem("civretro:index");
-            if (idxRaw) {
+            var sesRaw = localStorage.getItem("civretro:session");
+            if (idxRaw && sesRaw) {
                 var idx = JSON.parse(idxRaw);
-                if (!forceNew && idx.sessionId && idx.turns && idx.turns.length > 0) {
-                    var ageMs = Date.now() - (idx.lastTs || 0);
-                    // Primary signal: if Game.age differs from the stored age, it's an age
-                    // transition — resume unconditionally. Fallback: same-age reload within
-                    // 20 minutes (covers save/load and UI reloads within the same age).
+                var ses = JSON.parse(sesRaw);
+                var sessionRunId = ses.runId || null;
+                // Resume if: same runId (same driver launch = same game) and
+                // either the age just changed or a recent flush exists.
+                var sameRun = configRunId && sessionRunId && configRunId === sessionRunId;
+                if (sameRun && idx.sessionId && idx.totalTurns > 0) {
                     var ageChanged = (typeof Game !== "undefined") && idx.lastAge !== undefined && idx.lastAge !== Game.age;
+                    var ageMs = Date.now() - (idx.lastTs || 0);
                     if (ageChanged || ageMs < 1200000) {
                         sessionId = idx.sessionId;
-                        globalTurn = idx.totalTurns || idx.turns.length;
+                        globalTurn = idx.totalTurns;
                         if (idx.ages && idx.ages.length > 0) {
                             currentAge = idx.ages[idx.ages.length - 1].age;
                         }
@@ -60,7 +71,7 @@
         sessionId = "s" + Date.now().toString(36);
         globalTurn = 0;
         currentAge = null;
-        Automation.log("CIVRETRO:session:new id=" + sessionId);
+        Automation.log("CIVRETRO:session:new id=" + sessionId + " runId=" + configRunId);
     })();
 
     // -------------------------------------------------------------------------
@@ -298,8 +309,15 @@
                            && Network.getServerType && Network.getServerType() !== 0;
                 } catch (e) {}
 
+                var configRunId2 = null;
+                try {
+                    var cfgRaw2 = localStorage.getItem("civretro:config");
+                    if (cfgRaw2) { var cfg2 = JSON.parse(cfgRaw2); configRunId2 = cfg2.runId || null; }
+                } catch (e) {}
+
                 var meta = {
                     id: sessionId,
+                    runId: configRunId2,
                     startTurn: Game.turn,
                     age: Game.age,
                     ts: Date.now(),
@@ -332,7 +350,7 @@
             globalTurn++;
             var ageTurn = (data && data.turn !== undefined) ? data.turn : Game.turn;
             var snap = captureOmniscient(ageTurn);
-            localStorage.setItem("civretro:t:" + globalTurn, JSON.stringify(snap));
+            localStorage.setItem("civretro:" + sessionId + ":t:" + globalTurn, JSON.stringify(snap));
             if (globalTurn === 1) {
                 localStorage.setItem("civretro:firstTurn", JSON.stringify({ sessionId: sessionId, ts: Date.now(), ageTurn: ageTurn }));
             }
