@@ -1,5 +1,9 @@
 import { CDP } from "./cdp.js";
 import { readLSJson } from "./sqlite.js";
+import { writeFileSync, mkdirSync } from "fs";
+import { join } from "path";
+
+const MANIFEST_DIR = "/mnt/c/Users/Bernie Conrad/AppData/Local/Firaxis Games/Sid Meier's Civilization VII/ModUserData/civretro";
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -514,12 +518,17 @@ async function main() {
   log("running game...");
   const result = await pollUntilDone(cdp, runId, args.turns, args.timeoutMs);
 
-  // Write game manifest: ordered list of sessions with global turn ranges.
-  // Viewers use this to stitch ages together into a complete replay.
+  // Write game manifest to disk (synchronous, no SQLite flush timing issues).
+  // Viewers use this to stitch age sessions into a complete replay.
   if (result.sessions.length > 0) {
     const manifest = { runId, totalTurns: result.turns, sessions: result.sessions };
-    try { await setLS(cdp, `civretro:run:${runId}:manifest`, JSON.stringify(manifest)); } catch {}
-    log(`manifest: ${result.sessions.length} session(s) → ${result.sessions.map(s => `${s.sessionId}[${s.globalStart}-${s.globalEnd}]`).join(", ")}`);
+    try {
+      mkdirSync(MANIFEST_DIR, { recursive: true });
+      writeFileSync(join(MANIFEST_DIR, `${runId}.json`), JSON.stringify(manifest, null, 2));
+      log(`manifest: ${result.sessions.length} session(s) → ${result.sessions.map(s => `${s.sessionId}[${s.globalStart}-${s.globalEnd}]`).join(", ")}`);
+    } catch (e: any) {
+      log(`WARNING: failed to write manifest: ${e.message}`);
+    }
   }
 
   log("exiting to main menu...");
